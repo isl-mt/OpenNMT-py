@@ -7,60 +7,24 @@ from torch.autograd import Variable
 
 
 
-class Translator(object):
-    def __init__(self, opt):
-        self.opt = opt
-        self.tt = torch.cuda if opt.cuda else torch
+class InPlaceTranslator(object):
+    def __init__(self, model, dicts, beam_size=1, batch_size=16, cuda=True):
+        
         self.beam_accum = None
+        self.beam_size = beam_size
+        self.n_best = beam_size
+        self.batch_size = batch_size
+        self.model = model
+        self.cuda = cuda
+        self.tt = torch.cuda if self.cuda else torch
         
-        if opt.verbose:
-					print('Loading model from %s' % opt.model)
-        checkpoint = torch.load(opt.model,
-                               map_location=lambda storage, loc: storage)
-        
-        if opt.verbose:
-					print('Done')
-
-        model_opt = checkpoint['opt']
-        self.src_dict = checkpoint['dicts']['src']
-        self.tgt_dict = checkpoint['dicts']['tgt']
-        self._type = model_opt.encoder_type \
-            if "encoder_type" in model_opt else "text"
-
-        
-        encoder = onmt.Models.Encoder(model_opt, self.src_dict)
-        
-
-        decoder = onmt.Models.Decoder(model_opt, self.tgt_dict)
-        
-        generator = onmt.Models.Generator(model_opt.rnn_size, self.tgt_dict)
-        model = onmt.Models.NMTModel(encoder, decoder, generator)\
-        
-        #~ for k, v in checkpoint['model'].items():
-					#~ print k
-        
-        model_state_dict = {k: v for k, v in checkpoint['model'].items()
-															if 'criterion' not in k}
-
-        #~ generator = nn.Sequential(
-            #~ nn.Linear(model_opt.rnn_size, self.tgt_dict.size()),
-            #~ nn.LogSoftmax())
-            
-        
-
-        model.load_state_dict(model_state_dict)
-        #~ generator.load_state_dict(checkpoint['generator'])
-
-        if opt.cuda:
-            model.cuda()
-            generator.cuda()
-        else:
-            model.cpu()
-            generator.cpu()
-
+        self.src_dict = dicts['src']
+        self.tgt_dict = dicts['tgt']
+        self._type = 'text'
 
         self.model = model
         self.model.eval()
+        self.max_sent_length = 100
 
     def initBeamAccum(self):
         self.beam_accum = {
@@ -75,16 +39,12 @@ class Translator(object):
         else:
             return batch.size(0)
 
-    def buildData(self, srcBatch, goldBatch):
+    def buildData(self, srcBatch, goldBatch=None):
         # This needs to be the same as preprocess.py.
-        if self._type == "text":
-            srcData = [self.src_dict.convertToIdx(b,
-                                                  onmt.Constants.UNK_WORD)
-                       for b in srcBatch]
-        elif self._type == "img":
-            srcData = [transforms.ToTensor()(
-                Image.open(self.opt.src_img_dir + "/" + b[0]))
-                       for b in srcBatch]
+        
+        srcData = [self.src_dict.convertToIdx(b,
+                    onmt.Constants.UNK_WORD)
+                    for b in srcBatch]
 
         tgtData = None
         if goldBatch:
@@ -93,24 +53,24 @@ class Translator(object):
                        onmt.Constants.BOS_WORD,
                        onmt.Constants.EOS_WORD) for b in goldBatch]
 
-        return onmt.Dataset(srcData, tgtData, self.opt.batch_size,
-                            self.opt.cuda, volatile=True,
+        return onmt.Dataset(srcData, tgtData, self.batch_size,
+                            self.cuda, volatile=True,
                             data_type=self._type, balance=False)
 
     def buildTargetTokens(self, pred, src, attn):
         tokens = self.tgt_dict.convertToLabels(pred, onmt.Constants.EOS)
         tokens = tokens[:-1]  # EOS
-        if self.opt.replace_unk:
-            for i in range(len(tokens)):
-                if tokens[i] == onmt.Constants.UNK_WORD:
-                    _, maxIndex = attn[i].max(0)
-                    tokens[i] = src[maxIndex[0]]
+        #~ if self.opt.replace_unk:
+            #~ for i in range(len(tokens)):
+                #~ if tokens[i] == onmt.Constants.UNK_WORD:
+                    #~ _, maxIndex = attn[i].max(0)
+                    #~ tokens[i] = src[maxIndex[0]]
         return tokens
 
     def translateBatch(self, srcBatch, tgtBatch):
         # Batch size is in different location depending on data.
 
-        beamSize = self.opt.beam_size
+        beamSize = self.beam_size
 
         #  (1) run the encoder on the src
         encStates, context = self.model.encoder(srcBatch)
@@ -162,7 +122,7 @@ class Translator(object):
         decStates = (Variable(encStates[0].data.repeat(1, beamSize, 1)),
                      Variable(encStates[1].data.repeat(1, beamSize, 1)))
 
-        beam = [onmt.Beam(beamSize, self.opt.cuda) for k in range(batchSize)]
+        beam = [onmt.Beam(beamSize, self.cuda) for k in range(batchSize)]
 
         decOut = self.model.make_init_decoder_output(context)
 
@@ -170,11 +130,14 @@ class Translator(object):
             padMask = srcBatch.data.eq(
                 onmt.Constants.PAD).t() \
                                    .unsqueeze(0) \
-                                   .repeat(beamSize, 1, 1)
+                                   .repeat(beamSize, 1, 1) \
+                                   .squeeze(0)
 
         batchIdx = list(range(batchSize))
         remainingSents = batchSize
-        for i in range(self.opt.max_sent_length):
+        
+        #~ print(padMask.size())
+        for i in range(self.max_sent_length):
             mask(padMask)
             # Prepare decoder input.
             input = torch.stack([b.getCurrentState() for b in beam
@@ -230,13 +193,13 @@ class Translator(object):
             decOut = updateActive(decOut)
             context = updateActive(context)
             if useMasking:
-                padMask = padMask.index_select(1, activeIdx)
+                padMask = padMask.index_select(0, activeIdx)
 
             remainingSents = len(active)
 
         #  (4) package everything up
         allHyp, allScores, allAttn = [], [], []
-        n_best = self.opt.n_best
+        n_best = self.n_best
 
         for b in range(batchSize):
             scores, ks = beam[b].sortBest()
@@ -264,7 +227,7 @@ class Translator(object):
 
         return allHyp, allScores, allAttn, goldScores
 
-    def translate(self, srcBatch, goldBatch):
+    def translate(self, srcBatch, goldBatch=None):
         #  (1) convert words to indexes
         dataset = self.buildData(srcBatch, goldBatch)
         src, tgt, indices = dataset[0]
@@ -281,7 +244,7 @@ class Translator(object):
         for b in range(batchSize):
             predBatch.append(
                 [self.buildTargetTokens(pred[b][n], srcBatch[b], attn[b][n])
-                 for n in range(self.opt.n_best)]
+                 for n in range(self.n_best)]
             )
 
         return predBatch, predScore, goldScore

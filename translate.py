@@ -93,7 +93,7 @@ def main():
         import json
         translator.initBeamAccum()
 		
-		# here we are trying to 
+		# here we are trying to open the file
     inFile = None
     if(opt.src == "stdin"):
 			inFile = sys.stdin

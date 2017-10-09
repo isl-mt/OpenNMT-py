@@ -79,6 +79,7 @@ class GlobalAttention(nn.Module):
         # Get attention
         if self.mask is not None:
             attn.data.masked_fill_(self.mask, -float('inf'))
+            self.mask = None
         attn = self.sm(attn)
         attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x sourceL
 

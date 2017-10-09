@@ -1,5 +1,6 @@
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm
+from onmt.yellowfin import YFOptimizer
 
 
 class Optim(object):
@@ -14,6 +15,8 @@ class Optim(object):
             self.optimizer = optim.Adadelta(self.params, lr=self.lr)
         elif self.method == 'adam':
             self.optimizer = optim.Adam(self.params, lr=self.lr)
+        elif self.method == 'yellowfin':
+            self.optimizer = YFOptimizer(self.params, lr=self.lr)
         else:
             raise RuntimeError("Invalid optim method: " + self.method)
 
@@ -38,7 +41,9 @@ class Optim(object):
         Decay learning rate if val perf does not improve
         or we hit the start_decay_at limit.
         """
-
+        if self.method == 'yellowfin':
+            return
+        
         if self.start_decay_at is not None and epoch >= self.start_decay_at:
             self.start_decay = True
         if self.last_ppl is not None and ppl > self.last_ppl:
@@ -50,3 +55,16 @@ class Optim(object):
 
         self.last_ppl = ppl
         self.optimizer.param_groups[0]['lr'] = self.lr
+    
+    def setLearningRate(self, lr):
+        if self.method == 'yellowfin':
+            return
+        self.optimizer.param_groups[0]['lr'] = lr
+    
+    def getLearningRate(self):
+        
+        if self.method != 'yellowfin':
+            return self.optimizer.param_groups[0]['lr']
+        else:
+            
+            return self.optimizer._lr_t if self.optimizer._lr_t is not None else self.optimizer._lr

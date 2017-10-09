@@ -113,7 +113,7 @@ def saveVocabulary(name, vocab, file):
     vocab.writeFile(file)
 
 
-def makeData(srcFile, tgtFile, srcDicts, tgtDicts):
+def makeData(srcFile, tgtFile, srcDicts, tgtDicts, length_off_set=0):
     src, tgt = [], []
     sizes = []
     count, ignored = 0, 0
@@ -146,8 +146,8 @@ def makeData(srcFile, tgtFile, srcDicts, tgtDicts):
         srcWords = sline.split()
         tgtWords = tline.split()
 
-        if len(srcWords) <= opt.src_seq_length \
-           and len(tgtWords) <= opt.tgt_seq_length:
+        if len(srcWords) <= opt.src_seq_length + length_off_set \
+           and len(tgtWords) <= opt.tgt_seq_length + length_off_set:
 
             # Check truncation condition.
             if opt.src_seq_length_trunc != 0:
@@ -193,7 +193,7 @@ def makeData(srcFile, tgtFile, srcDicts, tgtDicts):
 
     print(('Prepared %d sentences ' +
           '(%d ignored due to length == 0 or src len > %d or tgt len > %d)') %
-          (len(src), ignored, opt.src_seq_length, opt.tgt_seq_length))
+          (len(src), ignored, opt.src_seq_length + length_off_set, opt.tgt_seq_length + length_off_set))
 
     return src, tgt
 
@@ -217,7 +217,7 @@ def main():
     print('Preparing validation ...')
     valid = {}
     valid['src'], valid['tgt'] = makeData(opt.valid_src, opt.valid_tgt,
-                                          dicts['src'], dicts['tgt'])
+                                          dicts['src'], dicts['tgt'], length_off_set=50)
 
     if opt.src_vocab is None:
         saveVocabulary('source', dicts['src'], opt.save_data + '.src.dict')
