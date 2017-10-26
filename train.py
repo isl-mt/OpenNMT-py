@@ -144,8 +144,7 @@ parser.add_argument('-reset_optim', action='store_true',
 
     
 # pretrained word vectors
-parser.add_argument('-tie_weights', action='store_true',
-                    help='Tie the weights of the encoder and decoder layer')
+
 parser.add_argument('-pre_word_vecs_enc',
                     help="""If a valid path is specified, then this will load
                     pretrained word embeddings on the encoder side.
@@ -551,49 +550,6 @@ def trainModel(model, trainData, validData, dataset, optims, criterion, critic):
                 stats.reset_stats()
 
             if opt.save_every > 0 and i % opt.save_every == -1 % opt.save_every :
-<<<<<<< HEAD
-							valid_loss = eval(model, criterion, validData)
-							valid_ppl = math.exp(min(valid_loss, 100))
-							print('Validation perplexity: %g' % valid_ppl)
-							
-							
-							model_state_dict = (model.module.state_dict() if len(opt.gpus) > 1
-                            else model.state_dict())
-							model_state_dict = {k: v for k, v in model_state_dict.items()
-																	if 'generator' not in k}
-							generator_state_dict = (model.generator.module.state_dict()
-																			if len(opt.gpus) > 1
-																			else model.generator.state_dict())
-							checkpoint = {
-									'model': model_state_dict,
-									'generator': generator_state_dict,
-									'dicts': dataset['dicts'],
-									'opt': opt,
-									'epoch': epoch,
-									'iteration' : -1,
-									'batchOrder' : None,
-									'optim': optim
-							}
-							#  drop a checkpoint
-							ep = float(epoch) - 1 + (i + 1) / nSamples
-							checkpoint = {
-									'model': model_state_dict,
-									'generator': generator_state_dict,
-									'dicts': dataset['dicts'],
-									'opt': opt,
-									'epoch': ep,
-									'iteration' : i,
-									'batchOrder' : batchOrder,
-									'optim': optim
-							}
-							
-							file_name = '%s_ppl_%.2f_e%.2f.pt'
-							print('Writing to %s_ppl_%.2f_e%.2f.pt' % (opt.save_model, valid_ppl, ep))
-							torch.save(checkpoint,
-												 file_name
-												 % (opt.save_model, valid_ppl, epoch))
-        return total_loss / total_words
-=======
                 valid_loss = evaluator.eval_perplexity(validData, criterion)
                 valid_ppl = math.exp(min(valid_loss, 100))
                 valid_bleu = evaluator.eval_translate(batch_size = opt.eval_batch_size)
@@ -634,7 +590,6 @@ def trainModel(model, trainData, validData, dataset, optims, criterion, critic):
                                      file_name
                                      % (opt.save_model, valid_ppl, valid_bleu, valid_score, ep))
         return stats.total_loss_xe / (stats.total_words_xe + 1e-6)
->>>>>>> 37a3cb51102b0004a0529e7a369a3e970e3ae3ac
 
     for epoch in range(opt.start_epoch, opt.start_epoch + opt.epochs):
         print('')
@@ -806,21 +761,6 @@ def main():
         )
     
     else:
-<<<<<<< HEAD
-        print('Loading optimizer from checkpoint:')
-        optim = checkpoint['optim']
-        print(optim)
-        
-    # Weight tying :
-    if opt.tie_weights:
-			model.tie_weights()
-
-    optim.set_parameters(model.parameters())
-
-    #~ if opt.train_from or opt.train_from_state_dict:
-        #~ optim.optimizer.load_state_dict(
-            #~ checkpoint['optim'].optimizer.state_dict())
-=======
          print('Loading optimizer from checkpoint:')
          optim = checkpoint['optim']  
          # Force change learning rate
@@ -849,12 +789,6 @@ def main():
         #~ optim.optimizer.load_state_dict(
             #~ checkpoint['optim'].optimizer.state_dict())
             
-<<<<<<< HEAD
-    #~ gBuffer = onmt.GradientBuffer(model)
->>>>>>> 37a3cb51102b0004a0529e7a369a3e970e3ae3ac
-
-=======
->>>>>>> 8794cdcef188a4994af07446404f00a82c7608a5
     nParams = sum([p.nelement() for p in model.parameters()])
     print('* number of parameters: %d' % nParams)
     

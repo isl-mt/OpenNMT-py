@@ -48,13 +48,6 @@ class OnlineTranslator(object):
     
 
     def translate(self,input):
-<<<<<<< HEAD
-              predBatch, predScore, goldScore = self.translator.translate([input.split()],[])
-              return " ".join(predBatch[0][0])
-  
-
-=======
         predBatch, predScore, goldScore = self.translator.translate([input.split()],[])
         return " ".join(predBatch[0][0])
   
->>>>>>> 8794cdcef188a4994af07446404f00a82c7608a5
