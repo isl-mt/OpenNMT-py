@@ -24,7 +24,7 @@ parser.add_argument('-output', default='pred.txt',
                     be the decoded sequence""")
 parser.add_argument('-beam_size',  type=int, default=5,
                     help='Beam size')
-parser.add_argument('-batch_size', type=int, default=30,
+parser.add_argument('-batch_size', type=int, default=1,
                     help='Batch size')
 parser.add_argument('-max_sent_length', type=int, default=100,
                     help='Maximum sentence length.')
@@ -74,12 +74,12 @@ def main():
     
     # Always pick n_best
     opt.n_best = opt.beam_size
-		
+        
     
     if opt.output == "stdout":
-			outF = sys.stdout
+            outF = sys.stdout
     else:
-			outF = open(opt.output, 'w')
+            outF = open(opt.output, 'w')
 
     predScoreTotal, predWordsTotal, goldScoreTotal, goldWordsTotal = 0, 0, 0, 0
 
@@ -92,17 +92,17 @@ def main():
     if opt.dump_beam != "":
         import json
         translator.initBeamAccum()
-		
-		# here we are trying to open the file
+        
+        # here we are trying to open the file
     inFile = None
     if(opt.src == "stdin"):
-			inFile = sys.stdin
-			opt.batch_size = 1
+            inFile = sys.stdin
+            opt.batch_size = 1
     else:
       inFile = open(opt.src)
-		
+        
     translator = onmt.Translator(opt)
-		
+        
     for line in addone(inFile):
         if line is not None:
             srcTokens = line.split()
@@ -129,7 +129,8 @@ def main():
                 predBatch_.append([bb[s] for s in sidx])
                 predScore_.append([ss_[s] for s in sidx])
             predBatch = predBatch_
-            predScore = predScore_                                                      
+            predScore = predScore_    
+                                                              
         predScoreTotal += sum(score[0] for score in predScore)
         predWordsTotal += sum(len(x[0]) for x in predBatch)
         if tgtF is not None:
@@ -137,12 +138,12 @@ def main():
             goldWordsTotal += sum(len(x) for x in tgtBatch)
             
         for b in range(len(predBatch)):
-						
+                        
             count += 1
-						
+                        
             if not opt.print_nbest:
-							outF.write(" ".join(predBatch[b][0]) + '\n')
-							outF.flush()
+                            outF.write(" ".join(predBatch[b][0]) + '\n')
+                            outF.flush()
 
             if opt.verbose:
                 srcSent = ' '.join(srcBatch[b])
@@ -162,18 +163,18 @@ def main():
                 if opt.print_nbest:
                     print('\nBEST HYP:')
                     for n in range(opt.n_best):
-												idx = n
-												print("[%.4f] %s" % (predScore[b][idx],
+                                                idx = n
+                                                print("[%.4f] %s" % (predScore[b][idx],
                                              " ".join(predBatch[b][idx])))
 
                 print('')
 
         srcBatch, tgtBatch = [], []
-		
+        
     if opt.verbose:
-			reportScore('PRED', predScoreTotal, predWordsTotal)
-			if tgtF:
-					reportScore('GOLD', goldScoreTotal, goldWordsTotal)
+            reportScore('PRED', predScoreTotal, predWordsTotal)
+            if tgtF:
+                    reportScore('GOLD', goldScoreTotal, goldWordsTotal)
 
     if tgtF:
         tgtF.close()

@@ -70,8 +70,8 @@ def moses_multi_bleu(hypFileName, refFileName, lowercase=False):
       bleu_score = float(bleu_score)
     except subprocess.CalledProcessError as error:
       if error.output is not None:
-        tf.logging.warning("multi-bleu.perl script returned non-zero exit code")
-        tf.logging.warning(error.output)
+        print("multi-bleu.perl script returned non-zero exit code")
+        print(error.output)
       bleu_score = np.float32(0.0)
 
   # Close temp files

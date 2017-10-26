@@ -26,21 +26,24 @@ class Translator(object):
         self.tgt_dict = checkpoint['dicts']['tgt']
         self._type = model_opt.encoder_type \
             if "encoder_type" in model_opt else "text"
+        
+        embeddings = onmt.utils.createEmbeddings(model_opt, checkpoint['dicts'])
 
+        model = onmt.utils.createNMT(model_opt, checkpoint['dicts'], embeddings)
         
-        encoder = onmt.Models.Encoder(model_opt, self.src_dict)
+        #~ encoder = onmt.Models.Encoder(model_opt, self.src_dict)
         
 
-        decoder = onmt.Models.Decoder(model_opt, self.tgt_dict)
+        #~ decoder = onmt.Models.Decoder(model_opt, self.tgt_dict)
         
-        generator = onmt.Models.Generator(model_opt.rnn_size, self.tgt_dict)
-        model = onmt.Models.NMTModel(encoder, decoder, generator)\
+        #~ generator = onmt.Models.Generator(model_opt.rnn_size, self.tgt_dict)
+        #~ model = onmt.Models.NMTModel(encoder, decoder, generator)\
         
         #~ for k, v in checkpoint['model'].items():
-					#~ print k
+                    #~ print k
         
         model_state_dict = {k: v for k, v in checkpoint['model'].items()
-															if 'criterion' not in k}
+                                                            if 'criterion' not in k}
 
         #~ generator = nn.Sequential(
             #~ nn.Linear(model_opt.rnn_size, self.tgt_dict.size()),
@@ -53,10 +56,8 @@ class Translator(object):
 
         if opt.cuda:
             model.cuda()
-            generator.cuda()
         else:
             model.cpu()
-            generator.cpu()
 
 
         self.model = model

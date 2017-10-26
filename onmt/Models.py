@@ -264,7 +264,7 @@ class NMTModel(RecurrentEncoderDecoder):
         # For input feeding initial output
         init_output = self.make_init_decoder_output(context)
 
-        sampled,  logprob = self.sample_from_context(context, init_output, enc_hidden, 
+        sampled, logprob, _ = self.sample_from_context(context, init_output, enc_hidden, 
                                                   init_input, argmax=argmax, max_length=max_length)
         
         return sampled
@@ -274,7 +274,7 @@ class NMTModel(RecurrentEncoderDecoder):
     # We need the context, the initial hidden layer, the initial state (for input feed) and an initial input
     # Options are: using argmax or stochastic, and to save the stochastic actions for reinforcement learning
     def sample_from_context(self, context, init_state, init_hiddens, init_input, 
-                                max_length=50, save=False, argmax=True):
+                                max_length=50, save=False, argmax=True, gen_entropy=False):
                         
         hidden = init_hiddens
         state = init_state
@@ -297,11 +297,15 @@ class NMTModel(RecurrentEncoderDecoder):
             state = Variable(state.data, volatile=True)
             input_t = Variable(input_t.data, volatile=True)
         
-        tensor_check = init_input[0].data.byte().new(batch_size, 1).zero_()
+        eos_check = init_input[0].data.byte().new(batch_size, 1).zero_()
                         
-        last_mask = init_input[0].data.byte().new(batch_size, 1).zero_()
+        pad_mask = init_input[0].data.byte().new(batch_size, 1).zero_()
         
         accumulated_logprob = None
+        
+        log_probs = []
+        
+        entropies = []
         
         
         for t in xrange(max_length):
@@ -311,75 +315,70 @@ class NMTModel(RecurrentEncoderDecoder):
             state = state.squeeze(0)
             output = self.generator(state) 
             if argmax:
-                sample = torch.topk(output, 1, dim=1)[1].data
+                sample_ = torch.topk(output, 1, dim=1)[1]
+                sample = sample_.data
                 
                 
             else: # Stochastic sampling
                 dist = output.exp()
                 
-                #~ sample = torch.multinomial(dist, 1) # batch_size x 1
                 sample_ = dist.multinomial(1)
                 
                 sample = sample_.data
+                
+                # entropy : -p logp 
+                if gen_entropy:
+                    entropy = -(dist * output).sum(-1).unsqueeze(0) # Batch x 1
+                    entropies.append(entropy)
+                
+            # log_prob of action at time T
+            
+            log_prob_t = output.gather(1, Variable(sample)).t() # 1 * batch_size
+            
+            log_probs.append(log_prob_t) 
             
             # log prob of the samples
-            #~ logprob = output.index_select(1, input_t.squeeze(0))        # batch_size * 1 
-                    
-            if save:
-                assert argmax==False
-                self.saved_actions.append(sample_)
-                
             check = (sample == onmt.Constants.EOS)
-
-            tensor_check |= check 
             
-            sample.masked_fill_(last_mask, onmt.Constants.PAD)
+            # update the <eos> check
+            eos_check |= check 
             
-            last_mask |= check
-          
-            break_signal = False
+            # everything after <EOS> is masked as PAD
+            sample.masked_fill_(pad_mask, onmt.Constants.PAD)
             
-            if tensor_check.sum() == batch_size:
-                break_signal = True
-            
+            # update the pad mask
+            pad_mask |= check
             
             input_t = Variable(sample.t())
-            
-            
-            #~ logprob.masked_fill(tensor_check.squeeze(0), 0)
-            
-            #~ if accumulated_logprob is None:
-                    #~ accumulated_logprob = logprob
-            #~ else:
-                    #~ accumulated_logprob += logprob
-            
+           
             sampled.append(input_t)
-            # if all sentences are finished (reach EOS)
-            if break_signal:
+
+            if save:
+                assert argmax==False
+                
+                #~ self.saved_actions.append(sample_)
+            
+             # stop sampling when all sentences reach eos 
+            if eos_check.sum() == batch_size:
                 break
         
-        # gather the lengths of the samples                                                
-        #~ lengths = [len(sampled) for i in xrange(batch_size)]
- 
-        #~ for i in xrange(batch_size):
-                        
-            #~ for t in xrange(len(sampled)):
-                    #~ if sampled[t].data[0][i] == onmt.Constants.EOS:
-                            #~ lengths[i] = t + 1
-                            #~ break
         
         # we concatenate them into one single Tensor                                 
-        sampled = torch.cat(sampled, 0)
+        sampled = torch.cat(sampled, 0) # T x B
         
-        #~ print(lengths)
+        log_probs = torch.cat(log_probs, 0) # T x B
+        
+        if len(entropies) > 0:
+            entropies = torch.cat(entropies, 0) # T x B
+        
         
         #~ return sampled, lengths, accumulated_logprob
-        return sampled, accumulated_logprob
+        return sampled, log_probs, entropies
                 
                 
     # Forward pass :
     # Two (or more) modes: Cross Entropy or Reinforce
-    def forward(self, input, mode='xe', max_length=50, gen_greedy=True, timestep_group=8):
+    def forward(self, input, mode='xe', max_length=50, gen_greedy=True, gen_entropy=False, timestep_group=8):
         src = input[0]
         tgt = input[1][:-1]  # exclude last target from inputs
         # Exclude <s> from targets for labels
@@ -434,16 +433,16 @@ class NMTModel(RecurrentEncoderDecoder):
             init_input = self.make_init_input(src)
             
             # save=True so that the stochastic actions will be saved for the backward pass
-            rl_samples, logprobs = self.sample_from_context(context, init_output, enc_hidden, 
-                                            init_input, argmax=False, max_length=min(length + 5, 51), save=True)
+            rl_samples, logprobs, entropies = self.sample_from_context(context, init_output, enc_hidden, 
+                                            init_input, argmax=False, max_length=min(length + 5, 51), save=True, gen_entropy=gen_entropy)
             # By default: the baseline is the samples from greedy search
             
             if gen_greedy:
-                greedy_samples,  _ = self.sample_from_context(context, init_output, enc_hidden, 
+                greedy_samples,  _, _ = self.sample_from_context(context, init_output, enc_hidden, 
                                                     init_input, argmax=True, max_length=min(length + 5, 51))                                                                                                                                                                 
-                return rl_samples, greedy_samples
+                return rl_samples, greedy_samples, logprobs, entropies
             else:
-                return rl_samples
+                return rl_samples, logprobs, entropies
         
         # Actor Critic
         # We only sample, the baseline scores are handled by another critic model
@@ -453,7 +452,7 @@ class NMTModel(RecurrentEncoderDecoder):
             init_input = self.make_init_input(src)
         
             # save=True so that the stochastic actions will be saved for the backward pass
-            rl_samples, logprobs = self.sample_from_context(context, init_output, enc_hidden, 
+            rl_samples, logprobs, entropies = self.sample_from_context(context, init_output, enc_hidden, 
                                             init_input, argmax=False, max_length=min(length + 5, 50), save=True)
 
             return rl_samples

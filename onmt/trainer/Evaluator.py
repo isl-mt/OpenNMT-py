@@ -94,7 +94,7 @@ class Evaluator(object):
                 # return a single score value
                 s = score(refWords, tgtWords)
                 
-                if len(s) > 0:
+                if len(s) > 2:
                     gleu = s[1]
                     hit = s[2]
                     
@@ -131,7 +131,7 @@ class Evaluator(object):
     # Compute critic loss of a valid data
     def eval_critic(self, data, dicts, score):
         
-        print("* Evaluating the critic")
+        #~ print("* Evaluating the critic")
         
         total_loss = 0
         total_sentences = 0
@@ -157,8 +157,6 @@ class Evaluator(object):
             
             # mask: L x B
             seq_mask = rl_actions.data.ne(onmt.Constants.PAD)
-            #~ print(rl_actions.data)
-            #~ print(seq_mask)
             seq_mask = seq_mask.float()
             num_words_sampled = torch.sum(seq_mask)
             total_sampled_words += num_words_sampled
@@ -170,13 +168,7 @@ class Evaluator(object):
             
             # compute loss for the critic
             # first we have to expand the reward
-            #~ expanded_reward = sampled_reward.unsqueeze(0).expand_as(seq_mask)
             expanded_reward = sampled_reward.unsqueeze(0).expand_as(seq_mask)
-            #~ print(expanded_reward)
-            
-            #~ expanded_reward = expanded_reward.cuda()
-            
-            #~ critic_output = critic_output.squeeze(2)
             
             # compute weighted loss for critic
             reward_variable = Variable(expanded_reward)
@@ -186,8 +178,6 @@ class Evaluator(object):
             total_sentences += src[0].size(1)
             
             
-            sys.stdout.write("\r* %i/%i Sentences" % (total_sentences, data.fullSize))
-            sys.stdout.flush()
             
         
         model.train()    
@@ -263,12 +253,10 @@ class Evaluator(object):
             if line is not None:
                 line = line.strip()
                 
+                # remove the hit parts:
                 ref = line.split(". ; .", 1)[0]
                 ref = ref.strip()
                 line = ref
-                
-                # remove the hit parts:
-                
                 
                 if bpe:
                     line = line.replace('@@ ', '')

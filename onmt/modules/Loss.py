@@ -9,4 +9,5 @@ def mse_loss(input, target):
 
 # Weighted min square error
 def weighted_mse_loss(input, target, weight):
+    #~ advantage = weight * (input - target)
     return torch.sum(weight * (input - target) ** 2)

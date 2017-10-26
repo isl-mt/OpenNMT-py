@@ -13,8 +13,8 @@ def compute_score(score, samples, ref, dicts, batch_size, average=True):
     # probably faster than gpu ?
     #~ samples = samples.cpu()
     
-    sdata = samples.data.cpu()
-    rdata = ref.data.cpu()
+    sdata = samples.data.cpu().t().tolist()
+    rdata = ref.data.cpu().t().tolist()
     
     tgtDict = dicts['tgt']
     
@@ -22,11 +22,15 @@ def compute_score(score, samples, ref, dicts, batch_size, average=True):
     
     for i in xrange(batch_size):
         
-        sampledIDs = sdata[:,i]
-        refIDs = rdata[:,i]
+        #~ sampledIDs = sdata[:,i]
+        #~ refIDs = rdata[:,i]
+        sampledIDs = sdata[i]
+        refIDs = rdata[i]
         
-        sampledWords = tgtDict.convertTensorToLabels(sampledIDs, onmt.Constants.EOS)
-        refWords = tgtDict.convertTensorToLabels(refIDs, onmt.Constants.EOS)
+        #~ sampledWords = tgtDict.convertTensorToLabels(sampledIDs, onmt.Constants.EOS)
+        #~ refWords = tgtDict.convertTensorToLabels(refIDs, onmt.Constants.EOS)
+        sampledWords = tgtDict.convertToLabels(sampledIDs, onmt.Constants.EOS)
+        refWords = tgtDict.convertToLabels(refIDs, onmt.Constants.EOS)
         
         # note: the score function returns a tuple 
         s[i] = score(refWords, sampledWords)[0]
@@ -103,7 +107,7 @@ def createCritic(opt, dicts, embeddings):
     
     critic_opt = copy.deepcopy(opt)
     # disable dropout on critic
-    critic_opt.dropout = 0
+    #~ critic_opt.dropout = 0.5
     
     encoder = onmt.Models.Encoder(critic_opt, dicts['src'], embeddings[0])
     

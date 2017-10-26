@@ -135,19 +135,18 @@ class Dict(object):
                 break
 
         return labels
-		
+        
     def convertTensorToLabels(self, tensor, stop):
-				
-				
-				labels = []
-				
-				# expect a single-dim tensor 
-				
-				for i in xrange(tensor.size(0)):
-					
-					idx = tensor[i]
-					labels += [self.getLabel(idx)]
-					if idx == stop:
-						break
-				
-				return labels
+        
+        labels = []
+        
+        # expect a single-dim tensor 
+        
+        for i in xrange(tensor.size(0)):
+            
+            idx = tensor[i]
+            labels += [self.getLabel(idx)]
+            if idx == stop:
+                break
+        
+        return labels
