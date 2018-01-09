@@ -8,13 +8,8 @@ import torch
 import torch.nn as nn
 from torch import cuda
 from torch.autograd import Variable
-from onmt.trainer.Evaluator import Evaluator
-from onmt.trainer.XETrainer import XETrainer
-from onmt.trainer.SelfCriticalTrainer import SCSTTrainer
 import math
 import time
-
-from onmt.trainer.Evaluator import Evaluator
 
 parser = argparse.ArgumentParser(description='train.py')
 onmt.Markdown.add_md_help_argument(parser)
@@ -33,12 +28,13 @@ parser.add_argument('-train_from_state_dict', default='', type=str,
 parser.add_argument('-train_from', default='', type=str,
                     help="""If training from a checkpoint then this is the
                     path to the pretrained model.""")
-parser.add_argument('-adapt_src', default='',
-                    help="""source language to adapt""")
-parser.add_argument('-adapt_tgt', default='',
-                    help="""target language to adapt""")
-parser.add_argument('-override', action='store_true',
-                    help="""Overwrite the save file to reduce space consumption""")
+parser.add_argument('-adapt_src', default='', type=str,
+                    help="""If training from a checkpoint then this is the
+                    path to the pretrained model.""")
+parser.add_argument('-adapt_tgt', default='', type=str,
+                    help="""If training from a checkpoint then this is the
+                    path to the pretrained model.""")
+
 # Model options
 
 parser.add_argument('-layers', type=int, default=2,
@@ -89,12 +85,6 @@ parser.add_argument('-curriculum', action="store_true",
 parser.add_argument('-extra_shuffle', action="store_true",
                     help="""By default only shuffle mini-batch order; when true,
                     shuffle and re-assign mini-batches""")
-parser.add_argument('-reinforce', action='store_true',
-                    help="""Using reinforcement learning""")
-parser.add_argument('-reinforce_metrics', default='gleu',
-                    help="Type of metrics to use. Options are [gleu|hit].")    
-parser.add_argument('-hit_alpha', type=float, default=0.3,
-                    help='Dropout probability; applied between LSTM stacks.')
 
 # learning rate
 parser.add_argument('-learning_rate', type=float, default=1.0,
@@ -110,8 +100,7 @@ parser.add_argument('-learning_rate_decay', type=float, default=1,
 parser.add_argument('-start_decay_at', type=int, default=8,
                     help="""Start decaying every epoch after and including this
                     epoch""")
-parser.add_argument('-reset_optim', action='store_true',
-                    help="""reset the optimization""")
+
 # pretrained word vectors
 
 parser.add_argument('-pre_word_vecs_enc',
@@ -155,7 +144,17 @@ if opt.gpus:
 
 torch.manual_seed(opt.seed)
 
-
+def averagePPL(losses, counts):
+    
+    #~ ppls = 
+    ppls = []
+    #~ print(losses)
+    #~ print(counts)
+    #~ for (loss, count) in enumerate(zip(losses, counts)):
+    for i in xrange(len(counts)):
+        ppl = math.exp(losses[i] / (counts[i] + 1e-6))
+        ppls.append(ppl)
+    return sum(ppls) / len(ppls)
 
 def NMTCriterion(dicts):
     
@@ -173,20 +172,118 @@ def NMTCriterion(dicts):
     
     return crits
 
+def memoryEfficientLoss(outputs, targets, generator, crit, eval=False):
+    # compute generations one piece at a time
+    loss = 0
+    outputs = Variable(outputs.data, requires_grad=(not eval), volatile=eval)
 
-def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
+    batch_size = outputs.size(1)
+    outputs_split = torch.split(outputs, opt.max_generator_batches)
+    targets_split = torch.split(targets, opt.max_generator_batches)
+    for i, (out_t, targ_t) in enumerate(zip(outputs_split, targets_split)):
+        out_t = out_t.view(-1, out_t.size(2))
+        scores_t = generator(out_t)
+        loss_t = crit(scores_t, targ_t.view(-1))
+        loss += loss_t.data[0]
+        if not eval:
+            loss_t.div(batch_size).backward()
+
+    grad_output = None if outputs.grad is None else outputs.grad.data
+    return loss, grad_output
+
+
+def eval(model, criterions, data, setIDs, pairID):
+    model.eval()
+    loss = 0
+    
+    sid = pairID
+    
+    dset = data[sid]
+    total_loss = 0
+    total_words = 0
+    
+    model.switchLangID(setIDs[sid][0], setIDs[sid][1])
+    model.switchPairID(sid)
+    
+    criterion = criterions[setIDs[sid][1]]    
+    
+    for i in range(len(dset)):
+        # exclude original indices
+        batch = dset[i][:-1]
+        outputs = model(batch)
+        # exclude <s> from targets
+        targets = batch[1][1:]
+        loss, _ = memoryEfficientLoss(
+                        outputs, targets, model.generator, criterion, eval=True)
+        total_loss += loss
+        total_words += targets.data.ne(onmt.Constants.PAD).sum()
+    
+    loss = total_loss / total_words
+    
+    #~ for sid in data: # sid = setid
+        #~ dset = data[sid]
+        #~ total_loss = 0
+        #~ total_words = 0
+        #~ 
+        #~ model.switchLangID(setIDs[sid][0], setIDs[sid][1])
+        #~ model.switchPairID(sid)
+        #~ 
+        #~ # each target language requires a criterion, right ?
+        #~ criterion =    criterions[setIDs[sid][1]]    
+        #~ for i in range(len(dset)):
+                #~ # exclude original indices
+                #~ batch = dset[i][:-1]
+                #~ outputs = model(batch)
+                #~ # exclude <s> from targets
+                #~ targets = batch[1][1:]
+                #~ loss, _ = memoryEfficientLoss(
+                                #~ outputs, targets, model.generator, criterion, eval=True)
+                #~ total_loss += loss
+                #~ total_words += targets.data.ne(onmt.Constants.PAD).sum()
+        #~ 
+        #~ loss = total_loss / total_words
+        #~ losses.append(loss)
+    
+        
+        
+    model.train()
+    return loss
+
+
+def trainModel(model, trainSets, validSets, dataset, optim):
     print(model)
     model.train()
 
-    # Define criterion of each target language.
+    # Define criterion of each GPU.
     criterions = NMTCriterion(dataset['dicts']['tgt'])
     setIDs = dataset['dicts']['setIDs']
 
     start_time = time.time()
+    
+    # find the source and target ID of the pair we need to adapt
+    srcID = dataset['dicts']['srcLangs'].index(opt.adapt_src)
+    tgtID = dataset['dicts']['tgtLangs'].index(opt.adapt_tgt)
+    
+    setIDs = dataset['dicts']['setIDs']
+    
+    # find the pair ID that we need to adapt
+    pairID = -1
+    for i, sid in enumerate(setIDs):
+        if sid[0] == srcID and sid[1] == tgtID:
+            pairID = i
+            break
+                    
+    assert pairID >= 0, "Cannot find any language pair with your provided src and tgt id"
+    print(" * Adapting pair %i " % pairID)
+    
 
     def trainEpoch(epoch, batchOrder=None):
 
+        if opt.extra_shuffle and epoch > opt.curriculum:
+            trainData.shuffle()
+
         # Shuffle mini batch order.
+        
         if not batchOrder:
             batchOrder = dict()
             for i in trainSets:
@@ -197,6 +294,7 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
         report_src_words = []
         start = time.time()
         
+
         for i in trainSets:
             total_loss[i] = 0
             total_words[i] = 0
@@ -205,28 +303,20 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
             report_src_words.append(0)
         
         dataSizes = [len(trainSets[i]) for i in trainSets]
-        nSamples = sum(dataSizes)
+        nSamples = dataSizes[pairID]
         
         # In order to make sets sample randomly,
         # We create a distribution over the data size
         # In the future we can manipulate this distribution 
         # to create biased sampling when training
-        sampleDist = torch.Tensor(len(setIDs))
         iterators = dict()
         for i in xrange(len(setIDs)):
-                    sampleDist[i] = len(trainSets[i])
-                    iterators[i] = -1
-        sampleDist = sampleDist / torch.sum(sampleDist)
+            iterators[i] = -1
+        
 
         for i in range(nSamples):
                         
-            sampledSet = -1
-            while True:
-                # if the sampled set is full then we re-sample 
-                # to ensure that in one epoch we read each example once
-                sampledSet = int(torch.multinomial(sampleDist, 1)[0])
-                if iterators[sampledSet] + 1 < dataSizes[sampledSet]:
-                    break
+            sampledSet = pairID
             
             iterators[sampledSet] += 1 
             
@@ -235,7 +325,6 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
             
             # Get the batch
             batch = trainSets[sampledSet][batchIdx][:-1]
-            batch_size = batch[1].size(1)
             
             # And switch the model to the desired language mode
             model.switchLangID(setIDs[sampledSet][0], setIDs[sampledSet][1])
@@ -243,20 +332,18 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
             
             # Do forward to the newly created graph
             model.zero_grad()
-            outputs, hiddens = model(batch)
+            outputs = model(batch)
             
             # Exclude <s> from targets.
             targets = batch[1][1:]
             # The criterion is for the target language side
             criterion = criterions[setIDs[sampledSet][1]]
+
+            loss, gradOutput = memoryEfficientLoss(
+                            outputs, targets, model.generator, criterion)
             
-            loss_v = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+            outputs.backward(gradOutput)
             
-            loss = loss_v.data[0]
-            
-            loss_v.div(batch_size).backward()
-            
-                        
             # Update the parameters.
             optim.step()
 
@@ -270,7 +357,8 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
 
             # Logging information
             if i == 0 or (i % opt.log_interval == -1 % opt.log_interval):
-                avgTrainLoss = averagePPL(report_loss, report_tgt_words)
+                avgTrainLoss = math.exp(report_loss[pairID] / (report_tgt_words[pairID] + 1e-6))
+                
                 logOut = ("Epoch %2d, %5d/%5d; ; %3.0f src tok/s; %3.0f tgt tok/s; %6.0f s elapsed; ppl: %6.2f; lr: %.6f" %
                                 (epoch, i+1, nSamples,
                                  sum(report_src_words)/(time.time()-start),
@@ -280,6 +368,10 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
                                  optim.get_learning_rate()))
                                  
                 for j in xrange(len(setIDs)):
+                    #~ ppl = math.exp(report_loss[j] / (report_tgt_words[j] + 1e-6))
+                    #~ setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][j])
+                    #~ pplLog = ("%s : %6.2f ;" % (setLangs, ppl))
+                    #~ logOut = logOut + pplLog
                     
                     report_loss[j] = 0
                     report_tgt_words[j] = 0
@@ -291,17 +383,17 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
                 
             # Saving checkpoints with validation perplexity
             if opt.save_every > 0 and i % opt.save_every == -1 % opt.save_every :
-                valid_losses = evaluator.eval_perplexity(validSets, criterions, setIDs=setIDs)
-                valid_ppl = [math.exp(min(valid_loss, 100)) for valid_loss in valid_losses]
-                #~ valid_ppl = " ".join([str(math.exp(min(valid_loss, 100))) for valid_loss in valid_losses])
-                for i in xrange(len(setIDs)):
-                    setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][i])
-                    print('Validation perplexity for set %s : %g' % (setLangs, valid_ppl[i]))
+                valid_loss = eval(model, criterions, validSets, setIDs, pairID)
+                valid_ppl = math.exp(min(valid_loss, 100))
+
+                
+                setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][pairID])
+                print('Validation perplexity for set %s : %g' % (setLangs, valid_ppl))
                 
                 
-                avgDevPpl = sum(valid_ppl) / len(valid_ppl)
+                avgDevPpl = valid_ppl
                 model_state_dict = (model.module.state_dict() if len(opt.gpus) > 1
-                else model.state_dict())
+                                                              else model.state_dict())
                 model_state_dict = {k: v for k, v in model_state_dict.items()
                                                         if 'generator' not in k}
                 generator_state_dict = (model.generator.module.state_dict()
@@ -319,7 +411,6 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
                         'epoch': ep,
                         'iteration' : i,
                         'batchOrder' : batchOrder,
-                        'optim': optim
                 }
                 
                 file_name = '%s_ppl_%.2f_e%.2f.pt'
@@ -328,37 +419,36 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
                 torch.save(checkpoint,
                                      file_name
                                      % (opt.save_model, avgDevPpl, ep))
-        return [total_loss[j] / total_words[j] for j in xrange(len(setIDs))]
+        return total_loss[pairID] / total_words[pairID]
         
-    #~ valid_losses = eval(model, criterions, validSets, setIDs)
-    valid_losses = evaluator.eval_perplexity(validSets, criterions, setIDs=setIDs)
-    valid_ppl = [math.exp(min(valid_loss, 100)) for valid_loss in valid_losses]
-    for i in xrange(len(setIDs)):
-        setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][i])
-        print('Validation perplexity for set %s : %g' % (setLangs, valid_ppl[i]))
-                
+    valid_loss = eval(model, criterions, validSets, setIDs, pairID)
+    valid_ppl = math.exp(min(valid_loss, 100))
+    setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][pairID])
+    print('Validation perplexity for set %s : %g' % (setLangs, valid_ppl))
+        
+        
     for epoch in range(opt.start_epoch, opt.start_epoch + opt.epochs):
         print('')
 
         #  (1) train for one epoch on the training set
-        train_losses = trainEpoch(epoch)
-        train_ppl = [math.exp(min(train_loss, 100)) for train_loss in train_losses]
-        for i in xrange(len(setIDs)):
-                    print('Training perplexity for set %d : %g' % (i, train_ppl[i]))
+        train_loss = trainEpoch(epoch)
+        train_ppl = math.exp(min(train_loss, 100))
+        
+        print('Training perplexity for set %d : %g' % (pairID, train_ppl))
 
         #  (2) evaluate on the validation set
-        valid_losses = evaluator.eval_perplexity(validSets, criterions, setIDs=setIDs)
-        valid_ppl = [math.exp(min(valid_loss, 100)) for valid_loss in valid_losses]
-        avgDevPpl = sum(valid_ppl) / len(valid_ppl)
-        for i in xrange(len(setIDs)):
-            print('Validation perplexity for set %d : %g' % (i, valid_ppl[i])) 
+        valid_loss = eval(model, criterions, validSets, setIDs, pairID)
+        valid_ppl = math.exp(min(valid_loss, 100))
+        setLangs = "-".join(lang for lang in dataset['dicts']['setLangs'][pairID])
+        print('Validation perplexity for set %s : %g' % (setLangs, valid_ppl))
+        avgDevPpl = valid_ppl
         #  (3) update the learning rate
         #~ optim.updateLearningRate(valid_ppl, epoch)
 
         model_state_dict = (model.module.state_dict() if len(opt.gpus) > 1
                             else model.state_dict())
-        model_state_dict = {k: v for k, v in model_state_dict.items() if 'generator' not in k}
-                            
+        model_state_dict = {k: v for k, v in model_state_dict.items()
+                            if 'generator' not in k}
         generator_state_dict = (model.generator.module.state_dict()
                                 if len(opt.gpus) > 1
                                 else model.generator.state_dict())
@@ -371,16 +461,14 @@ def trainModel(model, trainSets, validSets, dataset, optim, evaluator):
             'epoch': epoch,
             'iteration' : -1,
             'batchOrder' : None,
-            'optim': optim
         }
         
                 
-        #~ valid_ppl = "_".join([("%.2f" % math.exp(min(valid_loss, 100))) for valid_loss in valid_losses])
-        file_name = '%s_ppl_%.2f_e%d.pt'
-        print('Writing to %s_ppl_%.2f_e%d.pt' % (opt.save_model, avgDevPpl, epoch))
+        file_name = '%s.adapted.pt'
+        print('Writing to %s.adapted.pt' % (opt.save_model))
         torch.save(checkpoint,
                                      file_name
-                                     % (opt.save_model, avgDevPpl, epoch))
+                                     % (opt.save_model))
 
 
 def main():
@@ -416,7 +504,7 @@ def main():
         
 
     print(' * maximum batch size. %d' % opt.batch_size)
-
+#~ 
     print('Building model...')
     
     
@@ -425,7 +513,7 @@ def main():
     generator = onmt.Models.Generator(opt, dicts['tgt'])
 
     model = onmt.Models.NMTModel(encoder, decoder)
-
+#~ 
     if opt.train_from:
         print('Loading model from checkpoint at %s' % opt.train_from)
         chk_model = checkpoint['model']
@@ -459,29 +547,26 @@ def main():
     if opt.share_embedding:
             model.shareEmbedding(dicts)
 
-    if not opt.train_from_state_dict and not opt.train_from:
+    if (not opt.train_from_state_dict and not opt.train_from) or checkpoint['optim'] is None:
         for p in model.parameters():
             p.data.uniform_(-opt.param_init, opt.param_init)
+#~ 
+        #~ encoder.load_pretrained_vectors(opt)
+        #~ decoder.load_pretrained_vectors(opt)
 
         optim = onmt.Optim(
             opt.optim, opt.learning_rate, opt.max_grad_norm,
             lr_decay=opt.learning_rate_decay,
             start_decay_at=opt.start_decay_at
         )
-    elif not opt.reset_optim and 'optim' in checkpoint:
+    else:
         print('Loading optimizer from checkpoint:')
         optim = checkpoint['optim']
-    else:
-        optim = onmt.Optim(
-            opt.optim, opt.learning_rate, opt.max_grad_norm,
-            lr_decay=opt.learning_rate_decay,
-            start_decay_at=opt.start_decay_at
-        )
+        print(optim)
+
 
     optim.set_parameters(model.parameters())
     optim.set_learning_rate(opt.learning_rate)
-    
-    
 
     #~ if opt.train_from or opt.train_from_state_dict:
         #~ optim.optimizer.load_state_dict(
@@ -492,45 +577,8 @@ def main():
 
     nParams = sum([p.nelement() for p in model.parameters()])
     print('* number of parameters: %d' % nParams)
-    
-    if len(opt.adapt_src) > 0 and len(opt.adapt_tgt) > 0:
-    
-        # find the source and target ID of the pair we need to adapt
-        srcID = dataset['dicts']['srcLangs'].index(opt.adapt_src)
-        tgtID = dataset['dicts']['tgtLangs'].index(opt.adapt_tgt)
-    
-        setIDs = dataset['dicts']['setIDs']
-        
-        # find the pair ID that we need to adapt
-        pairID = -1
-        for i, sid in enumerate(setIDs):
-            if sid[0] == srcID and sid[1] == tgtID:
-                pairID = i
-                break
-                
-        if pairID == -1:
-            pairID = None
-    
-    else:
-        srcID = None
-        tgtID = None
-        pairID = None
-    
-    # convert string to IDs for easier manipulation
-    opt.adapt_src = srcID
-    opt.adapt_tgt = tgtID 
-    opt.pairID = pairID
-    
-    evaluator = Evaluator(model, dataset, opt, cuda=(len(opt.gpus) >= 1))
-    
-    if opt.reinforce:
-        trainer = SCSTTrainer(model, trainSets, validSets, dataset, optim, evaluator, opt)
-    else:
-        trainer = XETrainer(model, trainSets, validSets, dataset, optim, evaluator, opt)
-    
-    trainer.run()
 
-    #~ trainModel(model, trainSets, validSets, dataset, optim, evaluator)
+    trainModel(model, trainSets, validSets, dataset, optim)
 
 
 if __name__ == "__main__":

@@ -99,12 +99,12 @@ def sentence_gleu(reference, hypothesis, min_len=1, max_len=4):
     return (float(this_gleu),)
     
     # While GLEU is defined as the minimum of precision and
-            # recall, we can reduce the number of division operations by one by
-            # instead finding the maximum of the denominators for the precision
-            # and recall formulae, since the numerators are the same:
-            #     precision = tp / tpfp
-            #     recall = tp / tpfn
-            #     gleu_score = min(precision, recall) == tp / max(tpfp, tpfn)
+    # recall, we can reduce the number of division operations by one by
+    # instead finding the maximum of the denominators for the precision
+    # and recall formulae, since the numerators are the same:
+    #     precision = tp / tpfp
+    #     recall = tp / tpfn
+    #     gleu_score = min(precision, recall) == tp / max(tpfp, tpfn)
    
 	 
 	 

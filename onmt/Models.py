@@ -1,135 +1,68 @@
-import torch, sys
+import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import onmt.modules
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from torch.nn.utils.rnn import pack_padded_sequence as pack
-import random
-import rnnlib 
 
-#~ class CustomEncoder(nn.Module):
-#~ 
-    #~ def __init__(self, opt, dicts, embeddings):
-        #~ self.layers = opt.layers
-        #~ self.num_directions = 2 if opt.brnn else 1
-        #~ assert opt.rnn_size % self.num_directions == 0
-        #~ self.hidden_size = opt.rnn_size // self.num_directions
-        #~ input_size = opt.word_vec_size
-        #~ dropout_value = opt.dropout 
-#~ 
-        #~ super(Encoder, self).__init__()
-        #~ 
-        #~ self.word_lut = embeddings
-        #~ self.rnn = nn.LSTM(input_size, self.hidden_size,
-                           #~ num_layers=opt.layers,
-                           #~ dropout=dropout_value,
-                           #~ bidirectional=opt.brnn)
-                           #~ 
-    #~ def load_pretrained_vectors(self, opt):
-        #~ if opt.pre_word_vecs_enc is not None:
-            #~ pretrained = torch.load(opt.pre_word_vecs_enc)
-            #~ self.word_lut.weight.data.copy_(pretrained)
-#~ 
-    #~ def forward(self, input, hidden=None):
-        #~ if isinstance(input, tuple):
-            #~ # Lengths data is wrapped inside a Variable.
-            #~ lengths = input[1].data.view(-1).tolist()
-            #~ emb = pack(self.word_lut(input[0]), lengths)
-        #~ else:
-            #~ emb = self.word_lut(input)
-        #~ outputs, hidden_t = self.rnn(emb, hidden)
-        #~ if isinstance(input, tuple):
-            #~ outputs = unpack(outputs)[0]
-        #~ return hidden_t, outputs
-        
+
 class Encoder(nn.Module):
 
-    def __init__(self, opt, dicts, embeddings, custom=False):
+    def __init__(self, opt, dicts):
         self.layers = opt.layers
         self.num_directions = 2 if opt.brnn else 1
         assert opt.rnn_size % self.num_directions == 0
         self.hidden_size = opt.rnn_size // self.num_directions
         input_size = opt.word_vec_size
-        dropout_value = opt.dropout 
 
         super(Encoder, self).__init__()
+        self.word_lut = onmt.modules.MultiWordEmbedding(opt, dicts)
         
-        self.word_lut = embeddings
-        self.custom = custom
+        rnn = lambda: nn.LSTM(input_size, self.hidden_size,
+                           num_layers=opt.layers,
+                           dropout=opt.dropout,
+                           bidirectional=opt.brnn)
         
-        if custom != True:
-            self.rnn = nn.LSTM(input_size, self.hidden_size,
-                               num_layers=opt.layers,
-                               dropout=dropout_value,
-                               bidirectional=opt.brnn)
-        else:
-            self.rnn = rnnlib.RecurrentLayer(rnnlib.Cells.LSTMCell, input_size, opt.rnn_size,
-                                             num_layers=opt.layers, dropout=dropout_value,
-                                             bidirectional=opt.brnn)
-
-    def load_pretrained_vectors(self, opt):
-        if opt.pre_word_vecs_enc is not None:
-            pretrained = torch.load(opt.pre_word_vecs_enc)
-            self.word_lut.weight.data.copy_(pretrained)
+        self.rnn = onmt.modules.MultiModule(rnn, len(dicts), share=opt.share_rnn_enc)
     
-    def init_hidden(self, emb, batch_size):
-        
-        hidden = []
-        
-        for i in xrange(self.layers):
-            
-            for j in xrange(self.num_directions):
-                # allocate the initial hidden state
-                h = Variable(emb.data.new(batch_size, self.hidden_size).zero_())
-                c = Variable(emb.data.new(batch_size, self.hidden_size).zero_())
-                hidden.append((h,c))
-        
-        
-        return hidden
-        
 
     def forward(self, input, hidden=None):
-        #~ print isinstance(input, tuple)
         if isinstance(input, tuple):
             # Lengths data is wrapped inside a Variable.
             lengths = input[1].data.view(-1).tolist()
-            batch_size = input[0].size(1)
             emb = pack(self.word_lut(input[0]), lengths)
-            emb_data = emb[0]
         else:
-            batch_size = input.size(1)
             emb = self.word_lut(input)
-            emb_data = emb
-        
-        if hidden is None and self.custom:
-            hidden = self.init_hidden(emb_data, batch_size)
-        
         outputs, hidden_t = self.rnn(emb, hidden)
-        #~ print(outputs)
         if isinstance(input, tuple):
             outputs = unpack(outputs)[0]
         return hidden_t, outputs
+        
+    def switchID(self, srcID):
+                
+                self.word_lut.switchID(srcID)
+                self.rnn.switchID(srcID)
+                
+    def switchPairID(self, srcID):
+                
+                return
 
 
 class StackedLSTM(nn.Module):
-    def __init__(self, num_layers, input_size, rnn_size, dropout, custom=False):
+    def __init__(self, num_layers, input_size, rnn_size, dropout):
         super(StackedLSTM, self).__init__()
         self.dropout = nn.Dropout(dropout)
         self.num_layers = num_layers
         self.layers = nn.ModuleList()
-        
-        cell = nn.LSTMCell
-        if custom == True:
-            cell = rnnlib.Cells.LSTMCell
 
         for i in range(num_layers):
-            self.layers.append(cell(input_size, rnn_size))
+            self.layers.append(nn.LSTMCell(input_size, rnn_size))
             input_size = rnn_size
 
     def forward(self, input, hidden):
         h_0, c_0 = hidden
         h_1, c_1 = [], []
-        for i, layer in enumerate(self.layers):        
+        for i, layer in enumerate(self.layers):
             h_1_i, c_1_i = layer(input, (h_0[i], c_0[i]))
             input = h_1_i
             if i + 1 != self.num_layers:
@@ -145,7 +78,7 @@ class StackedLSTM(nn.Module):
 
 class Decoder(nn.Module):
 
-    def __init__(self, opt, dicts, embeddings, custom=False):
+    def __init__(self, opt, dicts, nPairs=1):
         self.layers = opt.layers
         self.input_feed = opt.input_feed
         input_size = opt.word_vec_size
@@ -153,25 +86,23 @@ class Decoder(nn.Module):
             input_size += opt.rnn_size
 
         super(Decoder, self).__init__()
-        #~ self.word_lut = nn.Embedding(dicts.size(),
-                                     #~ opt.word_vec_size,
-                                     #~ padding_idx=onmt.Constants.PAD)
-        self.word_lut = embeddings
-        self.rnn = StackedLSTM(opt.layers, input_size,
-                               opt.rnn_size, opt.dropout, custom=custom)
-        self.attn = onmt.modules.GlobalAttention(opt.rnn_size)
+        self.word_lut = onmt.modules.MultiWordEmbedding(opt, dicts)
+        
+        f = lambda: StackedLSTM(opt.layers, input_size, opt.rnn_size, opt.dropout)
+                               
+        self.rnn = onmt.modules.MultiModule(f, len(dicts), share=opt.share_rnn_dec) 
+        
+        attn = lambda : onmt.modules.GlobalAttention(opt.rnn_size)
+        self.attn = onmt.modules.MultiModule(attn, nPairs, share=opt.share_attention)
+        
         self.dropout = nn.Dropout(opt.dropout)
 
         self.hidden_size = opt.rnn_size
-        self.input_size = input_size
-        
-    def free_mask(self):
-        self.attn.free_mask()
 
-    def load_pretrained_vectors(self, opt):
-        if opt.pre_word_vecs_dec is not None:
-            pretrained = torch.load(opt.pre_word_vecs_dec)
-            self.word_lut.weight.data.copy_(pretrained)
+    #~ def load_pretrained_vectors(self, opt):
+        #~ if opt.pre_word_vecs_dec is not None:
+            #~ pretrained = torch.load(opt.pre_word_vecs_dec)
+            #~ self.word_lut.weight.data.copy_(pretrained)
 
     def forward(self, input, hidden, context, init_output):
         emb = self.word_lut(input)
@@ -194,25 +125,24 @@ class Decoder(nn.Module):
         outputs = torch.stack(outputs)
         return outputs, hidden, attn
         
-class RecurrentEncoderDecoder(nn.Module):
     
-    def __init__(self, encoder, decoder, generator):
-        super(RecurrentEncoderDecoder, self).__init__()
+    def switchID(self, tgtID):
+                
+                self.word_lut.switchID(tgtID)
+                self.rnn.switchID(tgtID)
+                
+    def switchPairID(self, pairID):
+                self.attn.switchID(pairID)
+                return
+
+
+class NMTModel(nn.Module):
+
+    def __init__(self, encoder, decoder):
+        super(NMTModel, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
-        self.generator = generator
-        
-    # For sampling functions, we need to create an initial input
-    # Which is vector of batch_size full of BOS    
-    def make_init_input(self, src, volatile=False):
-        if isinstance(src, tuple):
-                src = src[0]
-        batch_size = src.size(1)
-        i_size = (1, batch_size)
-        
-        input_vector = src.data.new(*i_size).fill_(onmt.Constants.BOS)
-        return Variable(input_vector, requires_grad=False, volatile=volatile)
-        
+
     def make_init_decoder_output(self, context):
         batch_size = context.size(1)
         h_size = (batch_size, self.decoder.hidden_size)
@@ -227,54 +157,23 @@ class RecurrentEncoderDecoder(nn.Module):
                     .view(h.size(0) // 2, h.size(1), h.size(2) * 2)
         else:
             return h
+            
+    # For sampling functions, we need to create an initial input
+    # Which is vector of batch_size full of BOS    
+    def make_init_input(self, src, volatile=False):
+        if isinstance(src, tuple):
+                src = src[0]
+        batch_size = src.size(1)
+        i_size = (1, batch_size)
+        
+        input_vector = src.data.new(*i_size).fill_(onmt.Constants.BOS)
+        return Variable(input_vector, requires_grad=False, volatile=volatile)
     
-
-class NMTModel(RecurrentEncoderDecoder):
-
-    def __init__(self, encoder, decoder, generator):
-        super(NMTModel, self).__init__(encoder, decoder, generator)
-        
-        # For reinforcement learning 
-        self.saved_actions = []
-        self.rewards = [] # remember that this is cumulative (sum of rewards from start to end)
-    
-    def tie_weights(self):
-        self.decoder.word_lut.weight = self.generator.net[0].weight
-        
-    def tie_join_embeddings(self):
-        self.encoder.word_lut.weight = self.decoder.word_lut.weight
-    
-    # Samping function (mostly for debugging)         
-    def sample(self, input, max_length=50, argmax=True):
-                        
-                                
-        src = input
-        # we don't care about tgt here
-        
-        enc_hidden, context = self.encoder(src)
-        
-        enc_hidden = (self._fix_enc_hidden(enc_hidden[0]),
-                self._fix_enc_hidden(enc_hidden[1]))
-        
-        sampled = []
-        
-        # we start from the vector of <BOS>                                
-        init_input = self.make_init_input(src, volatile=True)
-        
-        # For input feeding initial output
-        init_output = self.make_init_decoder_output(context)
-
-        sampled, logprob, _ = self.sample_from_context(context, init_output, enc_hidden, 
-                                                  init_input, argmax=argmax, max_length=max_length)
-        
-        return sampled
-                
-                
     # A function to sample from a pre-computed context 
     # We need the context, the initial hidden layer, the initial state (for input feed) and an initial input
     # Options are: using argmax or stochastic, and to save the stochastic actions for reinforcement learning
     def sample_from_context(self, context, init_state, init_hiddens, init_input, 
-                                max_length=50, save=False, argmax=True, gen_entropy=False):
+                                max_length=50, save=False, argmax=True):
                         
         hidden = init_hiddens
         state = init_state
@@ -285,6 +184,8 @@ class NMTModel(RecurrentEncoderDecoder):
         
         sampled = []
         
+        # if we don't save then create volatile variables
+        # to save memory
         if not save:
             context = Variable(context.data, volatile=True)
             
@@ -305,7 +206,6 @@ class NMTModel(RecurrentEncoderDecoder):
         
         log_probs = []
         
-        entropies = []
         
         
         for t in xrange(max_length):
@@ -326,15 +226,11 @@ class NMTModel(RecurrentEncoderDecoder):
                 
                 sample = sample_.data
                 
-                # entropy : -p logp 
-                if gen_entropy:
-                    entropy = -(dist * output).sum(-1).unsqueeze(0) # Batch x 1
-                    entropies.append(entropy)
-                
+   
             # log_prob of action at time T
             
             log_prob_t = output.gather(1, Variable(sample)).t() # 1 * batch_size
-            
+                        
             log_probs.append(log_prob_t) 
             
             # log prob of the samples
@@ -349,15 +245,17 @@ class NMTModel(RecurrentEncoderDecoder):
             # update the pad mask
             pad_mask |= check
             
-            input_t = Variable(sample.t())
+            
+            # note: one of the important steps here
+            # is to generate the data (tensor) 
+            # before making the actual variable
+            input_t = Variable(sample.t(), volatile=(not save))
            
             sampled.append(input_t)
 
             if save:
                 assert argmax==False
-                
-                #~ self.saved_actions.append(sample_)
-            
+                            
              # stop sampling when all sentences reach eos 
             if eos_check.sum() == batch_size:
                 break
@@ -368,22 +266,14 @@ class NMTModel(RecurrentEncoderDecoder):
         
         log_probs = torch.cat(log_probs, 0) # T x B
         
-        if len(entropies) > 0:
-            entropies = torch.cat(entropies, 0) # T x B
         
-        
-        #~ return sampled, lengths, accumulated_logprob
-        return sampled, log_probs, entropies
-                
-                
+        return sampled, log_probs
+
     # Forward pass :
     # Two (or more) modes: Cross Entropy or Reinforce
-    def forward(self, input, mode='xe', max_length=50, gen_greedy=True, gen_entropy=False, timestep_group=8):
+    def forward(self, input, mode='xe', max_length=50, gen_greedy=True, timestep_group=8):
         src = input[0]
         tgt = input[1][:-1]  # exclude last target from inputs
-        # Exclude <s> from targets for labels
-        tgt_label = input[1][1:]
-        
         enc_hidden, context = self.encoder(src)
         init_output = self.make_init_decoder_output(context)
 
@@ -402,7 +292,12 @@ class NMTModel(RecurrentEncoderDecoder):
         # Cross Entropy training:
         # Using teacher forcing and log-likelihood loss as normally
         if mode == 'xe':
-                
+            
+            # hiddens : final hidden states for decoder (before linear softmax)
+            # dec_hidden: lstm hidden states (c and h for each layer)
+            # _attn: attention weights 
+            #~ out, dec_hidden, _attn = self.decoder(tgt, enc_hidden,
+                                              #~ context, init_output)
             hiddens, dec_hidden, _attn = self.decoder(tgt, enc_hidden,
                   context, init_output)
             
@@ -421,111 +316,111 @@ class NMTModel(RecurrentEncoderDecoder):
             
             # concatenate into one single tensor
             outputs = torch.cat(outputs, 0)
-                        
-                
-                
+            
+            states = hiddens            
+         
             return outputs, states
-
-        # REINFORCE as in
-        # Self critical Reinforcement Learning
-        elif mode == 'rf' or mode == 'reinforce':
+        elif mode == 'rf':
+            
             # initial token (BOS)
             init_input = self.make_init_input(src)
             
             # save=True so that the stochastic actions will be saved for the backward pass
-            rl_samples, logprobs, entropies = self.sample_from_context(context, init_output, enc_hidden, 
-                                            init_input, argmax=False, max_length=min(length + 5, 51), save=True, gen_entropy=gen_entropy)
+            rl_samples, logprobs = self.sample_from_context(context, init_output, enc_hidden, 
+                                            init_input, argmax=False, max_length=min(length + 5, 51), save=True)
             # By default: the baseline is the samples from greedy search
             
             if gen_greedy:
-                greedy_samples,  _, _ = self.sample_from_context(context, init_output, enc_hidden, 
+                greedy_samples,  _ = self.sample_from_context(context, init_output, enc_hidden, 
                                                     init_input, argmax=True, max_length=min(length + 5, 51))                                                                                                                                                                 
-                return rl_samples, greedy_samples, logprobs, entropies
+                return rl_samples, greedy_samples, logprobs
             else:
-                return rl_samples, logprobs, entropies
+                return rl_samples, logprobs
         
-        # Actor Critic
-        # We only sample, the baseline scores are handled by another critic model
-        elif mode == 'ac':
-            
-            # initial token (BOS)
-            init_input = self.make_init_input(src)
+        else:
+            raise NotImplementedError
         
-            # save=True so that the stochastic actions will be saved for the backward pass
-            rl_samples, logprobs, entropies = self.sample_from_context(context, init_output, enc_hidden, 
-                                            init_input, argmax=False, max_length=min(length + 5, 50), save=True)
+                                              
+    def switchLangID(self, srcID, tgtID):
+                
+        self.encoder.switchID(srcID)
+        self.decoder.switchID(tgtID)
+        self.generator.switchID(tgtID)
+    def switchPairID(self, pairID):
+                
+        self.decoder.switchPairID(pairID)
+        
+    # This function needs to look at the dict
+    # If the dict at encoder and decoder has the same name -> tie them
+    def shareEmbedding(self, dicts):
+                
+        setIDs = dicts['setIDs']
+          
+        srcLangs = dicts['srcLangs']
+        tgtLangs = dicts['tgtLangs']
+        
+        tieList = list()
 
-            return rl_samples
+        for (i, srcLang) in enumerate(srcLangs):
             
+            for (j, tgtLang) in enumerate(tgtLangs):
+                
+                if srcLang == tgtLang:
+                    
+                    tieList.append([i, j])
+                    # Tie these embeddings
+                    print(' * Tying embedding of encoder and decoder for lang %s' % srcLang)
+                    npEnc = self.encoder.word_lut.moduleList[i].weight.nelement()
+                    npDec = self.decoder.word_lut.moduleList[j].weight.nelement()
+                    assert(npEnc == npDec)
+                    self.encoder.word_lut.moduleList[i].weight = self.decoder.word_lut.moduleList[j].weight            
+                    
+        return tieList
+                
+                
             
+
 class Generator(nn.Module):
-    def __init__(self, inputSize, dicts):
-            
-            super(Generator, self).__init__()
-            
-            self.inputSize = inputSize
-            self.outputSize = dicts.size()
-            
-            self.net = nn.Sequential(
-            nn.Linear(inputSize, self.outputSize),
-            nn.LogSoftmax())
-
-    def forward(self, input):
-            return self.net(input)
-
-
-# The critic generator is only a linear regressor         
-class CriticGenerator(nn.Module):
     
-    def __init__(self, inputSize):
-            
-        super(CriticGenerator, self).__init__()
+    def __init__(self, opt, dicts):
         
-        self.inputSize = inputSize
+        super(Generator, self).__init__()
         
-        # map the hidden state to a value
-        self.net = nn.Linear(inputSize, 1)
+        inputSize = opt.rnn_size
+        self.inputSizes = [] 
+        self.outputSizes = []
+        
+        for i in dicts:
+            vocabSize = dicts[i].size()
+            self.outputSizes.append(vocabSize)
+            self.inputSizes.append(inputSize)
             
-
+        self.linear = onmt.modules.MultiLinear(self.inputSizes, self.outputSizes)
+        self.lsm = nn.LogSoftmax()
+                            
     def forward(self, input):
-        return self.net(input)
+        
+        output = self.lsm(self.linear(input))
+        return output
+        
+    
+    def switchID(self, tgtID):
+        
+        self.linear.switchID(tgtID)
 
 
-class CriticModel(RecurrentEncoderDecoder):
-
-    def __init__(self, encoder, decoder, generator):
-        super(CriticModel, self).__init__(encoder, decoder, generator)
+def NMTCriterion(dicts, cuda=True):
+    
+    crits = dict()
+    for i in dicts:
+        vocabSize = dicts[i].size()
         
-    def forward(self, src, samples ):
+        weight = torch.ones(vocabSize)
+        weight[onmt.Constants.PAD] = 0
+        crit = nn.NLLLoss(weight, size_average=False)
+        if cuda:
+            crit.cuda()
         
-        # forward through the encoder first
-        enc_hidden, context = self.encoder(src)
-        
-        init_output = self.make_init_decoder_output(context)
-
-        enc_hidden = (self._fix_enc_hidden(enc_hidden[0]),
-                      self._fix_enc_hidden(enc_hidden[1]))
-                      
-        states = []
-        
-        outputs = []
-        
-        hidden = enc_hidden
-        state = init_output
-        batch_size = samples.size(1) 
-        length = samples.size(0)
-        
-        # forward through the critic decoder 
-        hiddens, dec_hidden, _attn = self.decoder(samples, enc_hidden,
-                  context, init_output)
-        
-        # reshae to batch * length x hidden_size
-        reshaped_hiddens = hiddens.view(-1, hiddens.size(-1)) 
-        
-        # batch * length x 1
-        critic_output = self.generator(reshaped_hiddens) 
-        
-        # reshape back to length x batch x 1
-        critic_output = critic_output.view(length, batch_size) 
-        
-        return critic_output
+        crits[i] = crit
+    
+    return crits

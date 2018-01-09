@@ -20,6 +20,9 @@ class TranslatorParameter(object):
         self.gpu = -1;
         self.cuda = 0;
         self.verbose = False
+        self.src_lang = ""
+        self.tgt_lang = ""
+        self.ensemble_op = "sum"
         
         self.readFile(filename)
 
@@ -37,6 +40,10 @@ class TranslatorParameter(object):
                 self.model = w[1]
             elif(w[0] == "beam_size"):
                 self.beam_size = int(w[1])
+            elif(w[0] == "src_lang"):
+                self.src_lang = w[1]
+            elif(w[0] == "tgt_lang"):
+                self.tgt_lang = w[1]
 
             line = f.readline()
 
@@ -51,3 +58,4 @@ class OnlineTranslator(object):
         predBatch, predScore, goldScore = self.translator.translate([input.split()],[])
         return " ".join(predBatch[0][0])
   
+

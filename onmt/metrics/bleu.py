@@ -48,11 +48,11 @@ def moses_multi_bleu(hypFileName, refFileName, lowercase=False):
   
   eval_file = "/tmp/multi-bleu.perl"
   if not isfile(eval_file):
-		multi_bleu_path, _ = urllib.request.urlretrieve(
+        multi_bleu_path, _ = urllib.request.urlretrieve(
         "https://raw.githubusercontent.com/moses-smt/mosesdecoder/"
         "master/scripts/generic/multi-bleu.perl", eval_file)
-		os.chmod(multi_bleu_path, 0o755)
-		
+        os.chmod(multi_bleu_path, 0o755)
+        
   multi_bleu_path = eval_file
 
   # Calculate BLEU using multi-bleu script

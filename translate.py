@@ -6,7 +6,6 @@ import torch
 import argparse
 import math
 import numpy
-import sys
 
 parser = argparse.ArgumentParser(description='translate.py')
 onmt.Markdown.add_md_help_argument(parser)
@@ -17,14 +16,20 @@ parser.add_argument('-src',   required=True,
                     help='Source sequence to decode (one line per sequence)')
 parser.add_argument('-src_img_dir',   default="",
                     help='Source image directory')
+parser.add_argument('-src_lang',   default="en",
+                    help='Source language')
 parser.add_argument('-tgt',
                     help='True target sequence (optional)')
+parser.add_argument('-tgt_lang',   default="de",
+                    help='Target language')                    
+parser.add_argument('-ensemble_op',   default="sum",
+                    help='Operator for ensemble decoding. Choices: sum/logsum')                    
 parser.add_argument('-output', default='pred.txt',
                     help="""Path to output the predictions (each line will
                     be the decoded sequence""")
 parser.add_argument('-beam_size',  type=int, default=5,
                     help='Beam size')
-parser.add_argument('-batch_size', type=int, default=1,
+parser.add_argument('-batch_size', type=int, default=30,
                     help='Batch size')
 parser.add_argument('-max_sent_length', type=int, default=100,
                     help='Maximum sentence length.')
@@ -75,11 +80,9 @@ def main():
     # Always pick n_best
     opt.n_best = opt.beam_size
         
-    
-    if opt.output == "stdout":
-            outF = sys.stdout
-    else:
-            outF = open(opt.output, 'w')
+    translator = onmt.Translator(opt)
+
+    outF = open(opt.output, 'w')
 
     predScoreTotal, predWordsTotal, goldScoreTotal, goldWordsTotal = 0, 0, 0, 0
 
@@ -92,18 +95,8 @@ def main():
     if opt.dump_beam != "":
         import json
         translator.initBeamAccum()
-        
-        # here we are trying to open the file
-    inFile = None
-    if(opt.src == "stdin"):
-            inFile = sys.stdin
-            opt.batch_size = 1
-    else:
-      inFile = open(opt.src)
-        
-    translator = onmt.Translator(opt)
-        
-    for line in addone(inFile):
+
+    for line in addone(open(opt.src)):
         if line is not None:
             srcTokens = line.split()
             srcBatch += [srcTokens]
@@ -120,16 +113,17 @@ def main():
 
         predBatch, predScore, goldScore = translator.translate(srcBatch,
                                                                tgtBatch)
+        
         if opt.normalize:
             predBatch_ = []
             predScore_ = []
             for bb, ss in zip(predBatch, predScore):
-                ss_ = [s_/numpy.maximum(1., len(b_)) for b_,s_ in zip(bb,ss)]
-                sidx = numpy.argsort(ss_)[::-1]
-                predBatch_.append([bb[s] for s in sidx])
-                predScore_.append([ss_[s] for s in sidx])
+                    ss_ = [s_/numpy.maximum(1., len(b_)) for b_,s_ in zip(bb,ss)]
+                    sidx = numpy.argsort(ss_)[::-1]
+                    predBatch_.append([bb[s] for s in sidx])
+                    predScore_.append([ss_[s] for s in sidx])
             predBatch = predBatch_
-            predScore = predScore_    
+            predScore = predScore_
                                                               
         predScoreTotal += sum(score[0] for score in predScore)
         predWordsTotal += sum(len(x[0]) for x in predBatch)
@@ -137,13 +131,31 @@ def main():
             goldScoreTotal += sum(goldScore)
             goldWordsTotal += sum(len(x) for x in tgtBatch)
             
+
         for b in range(len(predBatch)):
-                        
+            # Pred Batch always have n-best outputs  
+            #~ scores = torch.Tensor(len(predBatch[b]))
+            #~ for n in range(opt.n_best):
+                            #~ scores[n] = predScore[b][n]
+                            #~ if opt.normalize:
+                                #~ scores[n] = scores[n] / ( len(predBatch[b][n]) + 1)
+                        #~ 
+            #~ sorted_scores, sorted_index = torch.sort(scores, 0, True)
+            #~ bestSent = predBatch[b][sorted_index[0]]
+            #~ bestIndex = sorted_index[0]
             count += 1
-                        
+            # Best sentence = having highest log prob
+
             if not opt.print_nbest:
-                            outF.write(" ".join(predBatch[b][0]) + '\n')
-                            outF.flush()
+                outF.write(" ".join(predBatch[b][0]) + '\n')
+                outF.flush()
+            else:
+                for n in range(opt.n_best):
+                    idx = n
+                    #~ if opt.verbose:
+                    print("%d ||| %s ||| %.6f" % (count-1, " ".join(predBatch[b][idx]), predScore[b][idx]))
+                    outF.write("%d ||| %s ||| %.6f\n" % (count-1, " ".join(predBatch[b][idx]), predScore[b][idx]))
+                    outF.flush()
 
             if opt.verbose:
                 srcSent = ' '.join(srcBatch[b])
@@ -151,7 +163,7 @@ def main():
                     srcSent = srcSent.lower()
                 print('SENT %d: %s' % (count, srcSent))
                 print('PRED %d: %s' % (count, " ".join(predBatch[b][0])))
-                print("PRED SCORE: %.4f" %  predScore[b][0])
+                print("PRED SCORE: %.4f" % predScore[b][0])
 
                 if tgtF is not None:
                     tgtSent = ' '.join(tgtBatch[b])
@@ -159,30 +171,19 @@ def main():
                         tgtSent = tgtSent.lower()
                     print('GOLD %d: %s ' % (count, tgtSent))
                     print("GOLD SCORE: %.4f" % goldScore[b])
-
-                if opt.print_nbest:
-                    print('\nBEST HYP:')
-                    for n in range(opt.n_best):
-                                                idx = n
-                                                print("[%.4f] %s" % (predScore[b][idx],
-                                             " ".join(predBatch[b][idx])))
-
                 print('')
 
         srcBatch, tgtBatch = [], []
-        
-    if opt.verbose:
-            reportScore('PRED', predScoreTotal, predWordsTotal)
-            if tgtF:
-                    reportScore('GOLD', goldScoreTotal, goldWordsTotal)
+
+    reportScore('PRED', predScoreTotal, predWordsTotal)
+    if tgtF:
+        reportScore('GOLD', goldScoreTotal, goldWordsTotal)
 
     if tgtF:
         tgtF.close()
 
     if opt.dump_beam:
         json.dump(translator.beam_accum, open(opt.dump_beam, 'w'))
-    
-    
 
 
 if __name__ == "__main__":

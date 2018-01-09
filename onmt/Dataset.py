@@ -28,7 +28,7 @@ class Dataset(object):
         if self.balance:
             self.allocateBatch()
         else:
-            self.numBatches = math.ceil(len(self.src)/batchSize)
+            self.numBatches = int(math.ceil(len(self.src)/batchSize))
 
     #~ # This function allocates the mini-batches (grouping sentences with the same size)
     def allocateBatch(self):
@@ -64,7 +64,10 @@ class Dataset(object):
     def _batchify(self, data, align_right=False,
                   include_lengths=False, dtype="text"):
         if dtype == "text":
-            lengths = [x.size(0) for x in data]
+            try:
+                lengths = [x.size(0) for x in data]
+            except:
+                print(data[1:10])
             max_length = max(lengths)
             out = data[0].new(len(data), max_length).fill_(onmt.Constants.PAD)
             for i in range(len(data)):
@@ -96,30 +99,30 @@ class Dataset(object):
         assert index < self.numBatches, "%d > %d" % (index, self.numBatches)
         
         if self.balance:
-            batch = self.batches[index]
-            srcData = [self.src[i] for i in batch]
-            srcBatch, lengths = self._batchify(
-                    srcData,
-                    align_right=False, include_lengths=True, dtype=self._type)
-    
-            if self.tgt:
-                tgtData = [self.tgt[i] for i in batch]
-                tgtBatch = self._batchify(
-                            tgtData,
-                            dtype="text")
-            else:
-                    tgtBatch = None
+                    batch = self.batches[index]
+                    srcData = [self.src[i] for i in batch]
+                    srcBatch, lengths = self._batchify(
+                            srcData,
+                            align_right=False, include_lengths=True, dtype=self._type)
+            
+                    if self.tgt:
+                        tgtData = [self.tgt[i] for i in batch]
+                        tgtBatch = self._batchify(
+                                    tgtData,
+                                    dtype="text")
+                    else:
+                            tgtBatch = None
         else:
-            srcBatch, lengths = self._batchify(
+                    srcBatch, lengths = self._batchify(
             self.src[index*self.batchSize:(index+1)*self.batchSize],
             align_right=False, include_lengths=True, dtype=self._type)
 
-            if self.tgt:
-                    tgtBatch = self._batchify(
-                            self.tgt[index*self.batchSize:(index+1)*self.batchSize],
-                            dtype="text")
-            else:
-                    tgtBatch = None  
+                    if self.tgt:
+                            tgtBatch = self._batchify(
+                                    self.tgt[index*self.batchSize:(index+1)*self.batchSize],
+                                    dtype="text")
+                    else:
+                            tgtBatch = None  
 
         # within batch sorting by decreasing length for variable length rnns
         indices = range(len(srcBatch))
@@ -159,12 +162,3 @@ class Dataset(object):
     def shuffle(self):
         data = list(zip(self.src, self.tgt))
         self.src, self.tgt = zip(*[data[i] for i in torch.randperm(len(data))])
-
-
-class DataIterator(object):
-    def __init__(self, dataset, num_workers):
-        self.dataset = dataset
-        self.num_workers = num_workers
-        
-        
-    

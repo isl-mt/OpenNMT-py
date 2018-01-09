@@ -15,9 +15,9 @@ parser.add_argument('-config',    help="Read options from this file")
 
 parser.add_argument('-src_type', default="text",
                     help="Type of the source input. Options are [text|img].")
-parser.add_argument('-load_from', default="",
-                    help="Load the preprocessed data.")
-
+parser.add_argument('-load_from', required=True, type=str,
+                    help="""If training from a checkpoint then this is the
+                    path to the pretrained model.""")
 
 parser.add_argument('-train_src', required=True,
                     help="Path to the training source data")
@@ -97,13 +97,13 @@ def initVocabulary(name, dataFiles, vocabFile, vocabSize):
 
     vocab = None
     if vocabFile is not None:
-                vocabFile = vocabFile + "." + name
-                if os.path.isfile(vocabFile):
+        vocabFile = vocabFile + "." + name
+        if os.path.isfile(vocabFile):
         # If given, load existing word dictionary.
-                    print('Reading ' + name + ' vocabulary from \'' + vocabFile + '\'...')
-                    vocab = onmt.Dict()
-                    vocab.loadFile(vocabFile)
-                    print('Loaded ' + str(vocab.size()) + ' ' + name + ' words')
+            print('Reading ' + name + ' vocabulary from \'' + vocabFile + '\'...')
+            vocab = onmt.Dict()
+            vocab.loadFile(vocabFile)
+            print('Loaded ' + str(vocab.size()) + ' ' + name + ' words')
 
     if vocab is None:
         # If a dictionary is still missing, generate it.
@@ -207,179 +207,171 @@ def makeData(srcFile, tgtFile, srcDicts, tgtDicts):
 
 def main():
     
-    if len(opt.load_from) == 0:
-
-        dicts = {}
-    # First, we need to build the vocabularies
-        srcLangs = opt.src_langs.split("|")
-        tgtLangs = opt.tgt_langs.split("|")
-        
-        srcFiles = opt.train_src.split("|")
-        tgtFiles = opt.train_tgt.split("|")
-        validSrcFiles = opt.valid_src.split("|")
-        validTgtFiles = opt.valid_tgt.split("|")
-        
-        # Sanity checks
-        assert len(srcLangs) == len(tgtLangs)
-        assert len(srcLangs) == len(srcFiles)
-        assert len(srcFiles) == len(tgtFiles)
-        
-        langs = []
-        
-        for lang in srcLangs + tgtLangs:
-            if not lang in langs:
-                langs.append(lang)
-        
-        dicts['langs'] = langs
-        dicts['vocabs'] = dict()
-        dicts['nSets'] = len(srcLangs)
-        
-        uniqSrcLangs = list(OrderedDict.fromkeys(srcLangs))
-        uniqTgtLangs = list(OrderedDict.fromkeys(tgtLangs))
-        
-        dicts['srcLangs'] = uniqSrcLangs
-        dicts['tgtLangs'] = uniqTgtLangs
-        #~ print(uniqSrcLangs, uniqTgtLangs)
-        
-        for lang in langs:
-            if lang not in dicts['vocabs']:
-                dataFilesWithLang = []
-                for i in range(len(srcFiles)):
-                    if srcLangs[i] == lang:
-                        dataFilesWithLang.append(srcFiles[i])
-                    if tgtLangs[i] == lang:
-                        dataFilesWithLang.append(tgtFiles[i])
-                        
-                # We need to remove duplicate of this list 
-                
-                sortedDataFiles = list(OrderedDict.fromkeys(dataFilesWithLang))
-                dicts['vocabs'][lang] = initVocabulary(lang, sortedDataFiles, 
-                                                                                                         opt.vocab, opt.vocab_size)
-                #~ print(dataFilesWithLang)
-        
-        # store the actual dictionaries for each side
-        dicts['src'] = dict()
-        dicts['tgt'] = dict()
-
-        train = {}
-        train['src'] = list()
-        train['tgt'] = list()
-        dicts['setIDs'] = list()
-        dicts['setLangs'] = list()
-        
-        valid = {}
-        valid['src'] = list()
-        valid['tgt'] = list()
-
-        for i in range(dicts['nSets']):
-            
-            dicts['setIDs'].append([uniqSrcLangs.index(srcLangs[i]), uniqTgtLangs.index(tgtLangs[i])])
-            dicts['setLangs'].append([srcLangs[i], tgtLangs[i]])
-            
-            srcID = dicts['setIDs'][i][0]
-            tgtID = dicts['setIDs'][i][1]
-            
-            if srcID not in dicts['src']:
-                dicts['src'][srcID] = dicts['vocabs'][srcLangs[i]]
-            if tgtID not in dicts['tgt']:
-                dicts['tgt'][tgtID] = dicts['vocabs'][tgtLangs[i]]
-            
-            srcDict = dicts['vocabs'][srcLangs[i]]
-            tgtDict = dicts['vocabs'][tgtLangs[i]]
-            
-            print('Preparing training ... for set %d ' % i)
-            srcSet, tgtSet = makeData(srcFiles[i], tgtFiles[i], 
-                                                                                                     srcDict, tgtDict)
-            train['src'].append(srcSet)
-            train['tgt'].append(tgtSet)
-            
-        #dataset = torch.load(opt.load_from)
-        
-        #dicts = dataset['dicts']
-        
-        #srcLangs = opt.src_langs.split("|")
-        #tgtLangs = opt.tgt_langs.split("|")
-        
-        #srcFiles = opt.train_src.split("|")
-        #tgtFiles = opt.train_tgt.split("|")
-
-        #validSrcFiles = opt.valid_src.split("|")
-        #validTgtFiles = opt.valid_tgt.split("|")
-        
-        #langs = dicts['langs']
-        
-        nPairs = len(srcLangs)
-        
-        print(dicts['setIDs'])
-        
-        for i in range(dicts['nSets']):
-            srcDict = dicts['vocabs'][srcLangs[i]]
-            tgtDict = dicts['vocabs'][tgtLangs[i]]
-            
-            #~ setID = uniqSrcLangs.index(srcLangs[i])
-            
-            srcID = dicts['srcLangs'].index(srcLangs[i])
-            tgtID = dicts['tgtLangs'].index(tgtLangs[i])
-            
-            setID = dicts['setIDs'].index([srcID, tgtID])
-            
-            #print('Preparing training ... for set %d ' % setID)
-            print('Preparing validation ... for set %d ' % i)
-                
-            validSrcSet, validTgtSet = makeData(validSrcFiles[i], validTgtFiles[i],
-                                                 srcDict, tgtDict)
-                                                                                                     
-            valid['src'].append(validSrcSet)
-            valid['tgt'].append(validTgtSet)
-                
-                
-            if opt.vocab is None:
-                print('Saving vocabularies ... ')
-                for lang in langs:
-                    saveVocabulary(lang, dicts['vocabs'][lang], opt.save_data + '.dict.' + lang)
-                print('Done')
-            
-        print('Saving data to \'' + opt.save_data + '.train.pt\'...')
-        save_data = {'dicts': dicts,
-                     'type':  opt.src_type,
-                     'train': train,
-                     'valid': valid}
-            
-        torch.save(save_data, opt.save_data + '.train.pt')
-        print('Finished.')
-    #else:
-    #    dataset = torch.load(opt.load_from)
+    print("Loading pre-processed data from " + opt.load_from)
+    dataset = torch.load(opt.load_from)
     
-    #    dicts = dataset['dicts']
-        
-    #    srcLangs = opt.src_langs.split("|")
-    #    tgtLangs = opt.tgt_langs.split("|")
-        
-    #    srcFiles = opt.train_src.split("|")
-    #    tgtFiles = opt.train_tgt.split("|")
+    dicts = dataset['dicts']
+    
+    srcLangs = opt.src_langs.split("|")
+    tgtLangs = opt.tgt_langs.split("|")
+    
+    srcFiles = opt.train_src.split("|")
+    tgtFiles = opt.train_tgt.split("|")
 
-    #    validSrcFiles = opt.valid_src.split("|")
-    #    validTgtFiles = opt.valid_tgt.split("|")
+    validSrcFiles = opt.valid_src.split("|")
+    validTgtFiles = opt.valid_tgt.split("|")
+    
+    langs = dicts['langs']
+    
+    nPairs = len(srcLangs)
+    
+    print(dicts['setIDs'])
+    
+    train = {}
+    train['src'] = list()
+    train['tgt'] = list()
+    dicts['setIDs'] = list()
+    dicts['setLangs'] = list()
+    
+    valid = {}
+    valid['src'] = list()
+    valid['tgt'] = list()
+    
+    for i in range(nPairs):
+        srcDict = dicts['vocabs'][srcLangs[i]]
+        tgtDict = dicts['vocabs'][tgtLangs[i]]
         
-    #    langs = dicts['langs']
+        #~ setID = uniqSrcLangs.index(srcLangs[i])
         
-   #     nPairs = len(srcLangs)
+        srcID = int(dicts['srcLangs'].index(srcLangs[i]))
+        tgtID = int(dicts['tgtLangs'].index(tgtLangs[i]))
         
-    #    print(dicts['setIDs'])
+        print srcID, tgtID
         
-    #    for i in range(dicts['nSets']):
-    #        srcDict = dicts['vocabs'][srcLangs[i]]
-    #        tgtDict = dicts['vocabs'][tgtLangs[i]]
+        setID = -1
+        for i, cur_pair in enumerate(dicts['setIDs']):
+            print cur_pair
+            print cur_pair[0], cur_pair[1]
+            if cur_pair[0] == srcID and cur_pair[1] == tgtID:
+                setID = i
             
-            #~ setID = uniqSrcLangs.index(srcLangs[i])
+        assert setID >= 0, "Cannot find the language pair"
+            #~ 
+        #~ setID = dicts['setIDs'].index([srcID, tgtID])
+        
+        print('Preparing training ... for set %d ' % setID)
+        
+        srcSet, tgtSet = makeData(srcFiles[i], tgtFiles[i], 
+                                  srcDict, tgtDict)
+        
+        train['src'].append(srcSet)
+        train['tgt'].append(tgtSet)
             
-    #        srcID = dicts['srcLangs'].index(srcLangs[i])
-    #        tgtID = dicts['tgtLangs'].index(tgtLangs[i])
+        print('Preparing validation ... for set %d ' % i)
             
-    #        setID = dicts['setIDs'].index((srcID, tgtID))
-            
-    #        print('Preparing training ... for set %d ' % setID)
-
+        validSrcSet, validTgtSet = makeData(validSrcFiles[i], validTgtFiles[i],
+                                             srcDict, tgtDict)
+        valid['src'].append(validSrcSet)
+        valid['tgt'].append(validTgtSet)
+        
+        
+        #~ 
+        #~ # Sanity checks
+        #~ assert len(srcLangs) == len(tgtLangs)
+        #~ assert len(srcLangs) == len(srcFiles)
+        #~ assert len(srcFiles) == len(tgtFiles)
+        #~ 
+        #~ langs = []
+        #~ 
+        #~ for lang in srcLangs + tgtLangs:
+            #~ if not lang in langs:
+                #~ langs.append(lang)
+        #~ 
+        #~ dicts['langs'] = langs
+        #~ dicts['vocabs'] = dict()
+        #~ dicts['nSets'] = len(srcLangs)
+        #~ 
+        #~ uniqSrcLangs = list(OrderedDict.fromkeys(srcLangs))
+        #~ uniqTgtLangs = list(OrderedDict.fromkeys(tgtLangs))
+        #~ 
+        #~ dicts['srcLangs'] = uniqSrcLangs
+        #~ dicts['tgtLangs'] = uniqTgtLangs
+        #~ 
+        #~ for lang in langs:
+            #~ if lang not in dicts['vocabs']:
+                #~ dataFilesWithLang = []
+                #~ for i in range(len(srcFiles)):
+                    #~ if srcLangs[i] == lang:
+                        #~ dataFilesWithLang.append(srcFiles[i])
+                    #~ if tgtLangs[i] == lang:
+                        #~ dataFilesWithLang.append(tgtFiles[i])
+                        #~ 
+                #~ # We need to remove duplicate of this list 
+                #~ 
+                #~ sortedDataFiles = list(OrderedDict.fromkeys(dataFilesWithLang))
+                #~ dicts['vocabs'][lang] = initVocabulary(lang, sortedDataFiles, 
+                                                       #~ opt.vocab, opt.vocab_size)
+        #~ 
+        #~ # store the actual dictionaries for each side
+        #~ dicts['src'] = dict()
+        #~ dicts['tgt'] = dict()
+#~ 
+        #~ train = {}
+        #~ train['src'] = list()
+        #~ train['tgt'] = list()
+        #~ dicts['setIDs'] = list()
+        #~ dicts['setLangs'] = list()
+        #~ 
+        #~ valid = {}
+        #~ valid['src'] = list()
+        #~ valid['tgt'] = list()
+    #~ 
+        #~ for i in range(dicts['nSets']):
+            #~ 
+            #~ dicts['setIDs'].append([uniqSrcLangs.index(srcLangs[i]), uniqTgtLangs.index(tgtLangs[i])])
+            #~ dicts['setLangs'].append([srcLangs[i], tgtLangs[i]])
+            #~ 
+            #~ srcID = dicts['setIDs'][i][0]
+            #~ tgtID = dicts['setIDs'][i][1]
+            #~ 
+            #~ if srcID not in dicts['src']:
+                #~ dicts['src'][srcID] = dicts['vocabs'][srcLangs[i]]
+            #~ if tgtID not in dicts['tgt']:
+                #~ dicts['tgt'][tgtID] = dicts['vocabs'][tgtLangs[i]]
+            #~ 
+            #~ srcDict = dicts['vocabs'][srcLangs[i]]
+            #~ tgtDict = dicts['vocabs'][tgtLangs[i]]
+            #~ 
+            #~ print('Preparing training ... for set %d ' % i)
+            #~ srcSet, tgtSet = makeData(srcFiles[i], tgtFiles[i], 
+                                                                                                     #~ srcDict, tgtDict)
+            #~ train['src'].append(srcSet)
+            #~ train['tgt'].append(tgtSet)
+            #~ 
+            #~ print('Preparing validation ... for set %d ' % i)
+            #~ 
+            #~ validSrcSet, validTgtSet = makeData(validSrcFiles[i], validTgtFiles[i],
+                                                                                                     #~ srcDict, tgtDict)
+                                                                                                     #~ 
+            #~ valid['src'].append(validSrcSet)
+            #~ valid['tgt'].append(validTgtSet)
+            #~ 
+            #~ 
+        #~ if opt.vocab is None:
+            #~ print('Saving vocabularies ... ')
+            #~ for lang in langs:
+                #~ saveVocabulary(lang, dicts['vocabs'][lang], opt.save_data + '.dict.' + lang)
+            #~ print('Done')
+        #~ 
+        #~ print('Saving data to \'' + opt.save_data + '.train.pt\'...')
+    save_data = {'dicts': dicts,
+                 'type':  opt.src_type,
+                 'train': train,
+                 'valid': valid}
+        
+    torch.save(save_data, opt.save_data + '.train.pt')
+    print('Finished.')
+        
 
 if __name__ == "__main__":
     main()

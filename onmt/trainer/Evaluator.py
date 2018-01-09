@@ -3,274 +3,367 @@ from __future__ import division
 import sys, tempfile
 import onmt
 import onmt.modules
-from onmt.metrics.gleu import sentence_gleu
-from onmt.metrics.sbleu import sentence_bleu
+#~ from onmt.metrics.gleu import sentence_gleu
+#~ from onmt.metrics.sbleu import sentence_bleu
 from onmt.metrics.bleu import moses_multi_bleu
-from onmt.utils import compute_score
+#~ from onmt.utils import compute_score
 import torch
 import torch.nn as nn
 from torch import cuda
 from torch.autograd import Variable
 import math
 
+from onmt.metrics.gleu import sentence_gleu
+from onmt.metrics.hit import HitMetrics
+
 class Evaluator(object):
     
-    def __init__(self, model, critic, dataset, srcFile, tgtFile, cuda=False):
+    def __init__(self, model, dataset, opt, cuda=False):
         
         # some properties
         self.dataset = dataset
         self.dicts = dataset['dicts']
         
-        self.model = model
-        self.critic = critic
+        self.setIDs = dataset['dicts']['setIDs']
         
-        self.eval_files = (srcFile, tgtFile)
+        self.model = model
+        
         self.cuda = cuda
         
-    def setScore(self, score):
+        self.translator = onmt.InplaceTranslator(self.model, self.dicts, 
+                                            beam_size=1, 
+                                            cuda=self.cuda)
+        self.adapt = False
         
+        if opt.adapt_src is not None and opt.adapt_tgt is not None and opt.pairID is not None:
+            self.adapt = True
+            self.adapt_src = opt.adapt_src
+            self.adapt_tgt = opt.adapt_tgt
+            self.adapt_pair = opt.pairID
+            
+        if opt.reinforce_metrics == 'gleu':
+            self.score = sentence_gleu
+        elif opt.reinforce_metrics == 'hit':
+            hit_scorer = HitMetrics(opt.hit_alpha)
+            self.score = hit_scorer.hit
+        else:
+            raise NotImplementedError
+            
+        
+    def setScore(self, score):
         self.score = score
     
     def setCriterion(self, criterion):
-        
         self.criterion = criterion
     
     
     # Compute perplexity of a data given the model
-    def eval_perplexity(self, data, criterion):
-        total_loss = 0
-        total_words = 0
+    # For a multilingual dataset, we may need the setIDs of the desired languages
+    # data is a dictionary with key = setid and value = DataSet object
+    def eval_perplexity(self, data, criterions, setIDs=None):
         
-        model = self.model
-
-        model.eval()
-        for i in range(len(data)):
-            # exclude original indices
-            batch = data[i][:-1]
-            outputs , _ = model(batch)
-            # exclude <s> from targets
-            targets = batch[1][1:]
-            outputs_flat = outputs.view(-1, outputs.size(-1))
-            targets_flat = targets.view(-1)
-            loss = criterion(outputs_flat, targets_flat)
-            total_loss += loss.data[0]
-            total_words += targets.data.ne(onmt.Constants.PAD).sum()
-
-        model.train()
-        return total_loss / total_words
-        
-    def eval_reinforce(self, data, score, verbose=False):
-        
-        total_score = 0
-        total_sentences = 0
-        
-        total_hit = 0
-        total_hit_sentences = 0
-        total_gleu = 0
-        
+        if setIDs is None:
+            setIDs = self.setIDs
+            
         model = self.model
         model.eval()
-        tgtDict = self.dicts['tgt']
-        srcDict = self.dicts['src']
         
-        for i in range(len(data)):
-            batch = data[i][:-1]
-            src = batch[0]
-            ref = batch[1][1:]
-            # we need to sample
-            sampled_sequence = model.sample(src, max_length=100, argmax=True)
-            batch_size = ref.size(1)
+        # return a list of losses for each language
+        losses = dict()
+        
+        for sid in data: # sid = setid
             
-            for idx in xrange(batch_size):
-            
-                tgtIds = sampled_sequence.data[:,idx]
-                
-                tgtWords = tgtDict.convertTensorToLabels(tgtIds, onmt.Constants.EOS)        
-                                
-                refIds = ref.data[:,idx]
-                
-                refWords = tgtDict.convertTensorToLabels(refIds, onmt.Constants.EOS)
-                
-                # return a single score value
-                s = score(refWords, tgtWords)
-                
-                if len(s) > 2:
-                    gleu = s[1]
-                    hit = s[2]
-                    
-                    if hit >= 0:
-                        total_hit_sentences += 1
-                        total_hit += hit
-                
-                if verbose:
-                    sampledSent = " ".join(tgtWords)
-                    refSent = " ".join(refWords)
-                    
-                    if s[0] > 0:
-                        print "SAMPLE :", sampledSent
-                        print "   REF :", refSent
-                        print "Score =", s
-                    
-                    
-                
-                
-                # bleu is scaled by 100, probably because improvement by .01 is hard ?
-                total_score += s[0] * 100 
-                
-            total_sentences += batch_size
-        
-        if total_hit_sentences > 0:
-            average_hit = total_hit / total_hit_sentences
-            print("Average HIT : %.2f" % (average_hit * 100))
-        
-        average_score = total_score / total_sentences
-        model.train()
-        return average_score
-            
-    
-    # Compute critic loss of a valid data
-    def eval_critic(self, data, dicts, score):
-        
-        #~ print("* Evaluating the critic")
-        
-        total_loss = 0
-        total_sentences = 0
-        total_sampled_words = 0
-        model = self.model
-        critic = self.critic
-
-        model.eval()
-        critic.eval()
-        
-        for i in range(len(data)):
-            # exclude original indices
-            batch = data[i][:-1]
-            
-            src = batch[0]
-            ref = batch[1][1:]
-            
-            rl_actions = model.sample(src, argmax=True)
-            
-            critic_input = Variable(rl_actions.data, volatile=True)
-            
-            critic_output = critic(src, critic_input)
-            
-            # mask: L x B
-            seq_mask = rl_actions.data.ne(onmt.Constants.PAD)
-            seq_mask = seq_mask.float()
-            num_words_sampled = torch.sum(seq_mask)
-            total_sampled_words += num_words_sampled
-            
-            # reward for samples from stochastic function
-            batch_size = src[0].size(1)
-            sampled_reward = compute_score(score, rl_actions, ref, dicts, batch_size) 
-            
-            
-            # compute loss for the critic
-            # first we have to expand the reward
-            expanded_reward = sampled_reward.unsqueeze(0).expand_as(seq_mask)
-            
-            # compute weighted loss for critic
-            reward_variable = Variable(expanded_reward)
-            weight_variable = Variable(seq_mask)
-            critic_loss = onmt.modules.Loss.weighted_mse_loss(critic_output, reward_variable, weight_variable)
-            total_loss += critic_loss.data[0]
-            total_sentences += src[0].size(1)
-            
-            
-            
-        
-        model.train()    
-        critic.train()
-        
-        
-        loss = total_loss / total_sampled_words
-        return loss
-        
-    
-    # Compute translation quality of a data given the model
-    def eval_translate(self, beam_size=1, batch_size=16, bpe=True):
-        
-        def addone(f):
-            for line in f:
-                yield line
-            yield None
-        
-        srcFile = self.eval_files[0]
-        tgtFile = self.eval_files[1]
-        
-        if len(srcFile) == 0:
-            return 0
-        print(" * Translating file %s " % srcFile )
-        # initialize the translator for beam search
-        translator = onmt.InPlaceTranslator(self.model, self.dicts, beam_size=beam_size, 
-                                            batch_size=batch_size, 
-                                            cuda=self.cuda)
-        
-        srcBatch = []
-        
-        count = 0
-        
-        # we print translations into temp files
-        outF = tempfile.NamedTemporaryFile()
-        outRef = tempfile.NamedTemporaryFile()
-        
-        nLines = len(open(srcFile).readlines())
-        
-        inFile = open(srcFile)
-        
-        for line in addone(inFile):
-            if line is not None:
-                srcTokens = line.split()
-                srcBatch += [srcTokens]
-                if len(srcBatch) < batch_size:
+            if self.adapt:
+                # if we are adapting then we only care about that pair
+                if sid != self.adapt_pair:
                     continue
             
-            if len(srcBatch) == 0:
-                break        
-                
-            predBatch, predScore, goldScore = translator.translate(srcBatch)
+            dset = data[sid]
+            total_loss = 0
+            total_words = 0
             
-            for b in range(len(predBatch)):
-                count += 1
-                decodedSent = " ".join(predBatch[b][0])
-                
-                if bpe:
-                    decodedSent = decodedSent.replace('@@ ', '')
-                
-                outF.write(decodedSent + "\n")
-                outF.flush()
-                
-                sys.stdout.write("\r* %i/%i Sentences" % (count , nLines))
-                sys.stdout.flush()
+            model.switchLangID(setIDs[sid][0], setIDs[sid][1])
+            model.switchPairID(sid)
             
-            srcBatch = []
+            # each target language requires a criterion, right ?
+            criterion = criterions[setIDs[sid][1]]    
+            for i in range(len(dset)):
+                # exclude original indices
+                batch = dset[i][:-1]
+                outputs, hiddens = model(batch)
+                # exclude <s> from targets
+                targets = batch[1][1:]
+                outputs_flat = outputs.view(-1, outputs.size(-1))
+                targets_flat = targets.view(-1)
+                loss = criterion(outputs_flat, targets_flat)
+                total_loss += loss.data[0]
+                total_words += targets.data.ne(onmt.Constants.PAD).sum()
             
-        print("\nDone")
-        refFile = open(tgtFile)
+            normalized_loss = total_loss / total_words
+            losses[sid] = math.exp(min(normalized_loss, 100))
         
-        for line in addone(refFile):
-            if line is not None:
-                line = line.strip()
+        model.train()
+        return losses
+    
+    
+    # the only difference of this function and eval translate is that 
+    # the metrics is not BLEU, but the scorer
+    #~ def eval_reinforce(self, data, verbose=False, setIDs=None):
+    #~ 
+        #~ score = self.score
+        #~ 
+        #~ model = self.model
+        #~ model.eval()
+        #~ 
+        #~ # return a list of scores for each language
+        #~ total_scores = dict()
+        #~ total_sentences = dict()
+        #~ 
+        #~ total_hit = 0
+        #~ total_hit_sentences = 0
+        #~ 
+        #~ for sid in data: # sid = setid
+            #~ if self.adapt:
+                #~ # if we are adapting then we only care about that pair
+                #~ if sid != self.adapt_pair:
+                    #~ continue
+                    #~ 
+            #~ dset = data[sid]
+            #~ model.switchLangID(setIDs[sid][0], setIDs[sid][1])
+            #~ model.switchPairID(sid)
+            #~ 
+            #~ tgt_lang = self.dicts['tgtLangs'][setIDs[sid][1]]
+            #~ src_lang = self.dicts['srcLangs'][setIDs[sid][0]]
+            #~ tgt_dict = self.dicts['vocabs'][tgt_lang]
+            #~ src_dict = self.dicts['vocabs'][src_lang]
+            #~ 
+            #~ for i in range(len(dset)):
+                #~ # exclude original indices
+                #~ batch = dset[i][:-1]
+                #~ 
+                #~ src = batch[0]
+                #~ 
+                #~ # exclude <s> from targets
+                #~ targets = batch[1][1:]
+                #~ 
+                #~ transposed_targets = targets.data.transpose(0, 1) # bsize x nwords
+                #~ 
+                #~ pred = self.translator.translate(src)
+                #~ 
+                #~ batch_size = len(pred)
+                #~ 
+                #~ for b in range(batch_size)
                 
-                # remove the hit parts:
-                ref = line.split(". ; .", 1)[0]
-                ref = ref.strip()
-                line = ref
+                #~ bpe_string = bpe_token + bpe_token + " "
+                #~ 
+                #~ for b in range(len(pred)):
+                    #~ 
+                    #~ ref_tensor = transposed_targets[b].tolist()
+                    #~ 
+                    #~ decodedSent = tgt_dict.convertToLabels(pred[b], onmt.Constants.EOS)
+                    #~ decodedSent = " ".join(decodedSent)
+                    #~ decodedSent = decodedSent.replace(bpe_string, '')
+                    #~ 
+                    #~ refSent = tgt_dict.convertToLabels(ref_tensor, onmt.Constants.EOS)
+                    #~ refSent = " ".join(refSent)
+                    #~ 
+                    #~ refSent = refSent.split('. ; .')[0]
+                    #~ 
+                    #~ refSent = refSent.replace(bpe_string, '')
+                    #~ 
+                    #~ 
+                    #~ # Flush the pred and reference sentences to temp files 
+                    #~ outF.write(decodedSent + "\n")
+                    #~ outF.flush()
+                    #~ outRef.write(refSent + "\n")
+                    #~ outRef.flush()
+            
+            
+        #~ total_gleu = 0
+        #~ tgtDict = self.dicts['tgt']
+        #~ srcDict = self.dicts['src']
+        #~ 
+        #~ for i in range(len(data)):
+            #~ batch = data[i][:-1]
+            #~ src = batch[0]
+            #~ ref = batch[1][1:]
+            #~ # we need to sample
+            #~ sampled_sequence = model.sample(src, max_length=100, argmax=True)
+            #~ batch_size = ref.size(1)
+            #~ 
+            #~ for idx in xrange(batch_size):
+            #~ 
+                #~ tgtIds = sampled_sequence.data[:,idx]
+                #~ 
+                #~ tgtWords = tgtDict.convertTensorToLabels(tgtIds, onmt.Constants.EOS)        
+                                #~ 
+                #~ refIds = ref.data[:,idx]
+                #~ 
+                #~ refWords = tgtDict.convertTensorToLabels(refIds, onmt.Constants.EOS)
+                #~ 
+                #~ # return a single score value
+                #~ s = score(refWords, tgtWords)
+                #~ 
+                #~ if len(s) > 2:
+                    #~ gleu = s[1]
+                    #~ hit = s[2]
+                    #~ 
+                    #~ if hit >= 0:
+                        #~ total_hit_sentences += 1
+                        #~ total_hit += hit
+                #~ 
+                #~ if verbose:
+                    #~ sampledSent = " ".join(tgtWords)
+                    #~ refSent = " ".join(refWords)
+                    #~ 
+                    #~ if s[0] > 0:
+                        #~ print "SAMPLE :", sampledSent
+                        #~ print "   REF :", refSent
+                        #~ print "Score =", s
+#~ 
+                #~ # bleu is scaled by 100, probably because improvement by .01 is hard ?
+                #~ total_score += s[0] * 100 
+                #~ 
+            #~ total_sentences += batch_size
+        #~ 
+        #~ if total_hit_sentences > 0:
+            #~ average_hit = total_hit / total_hit_sentences
+            #~ print("Average HIT : %.2f" % (average_hit * 100))
+        #~ 
+        #~ average_score = total_score / total_sentences
+        #~ model.train()
+        #~ return average_score
+    
+    
+    # Compute translation quality of a data given the model
+    # return: bleu scores (de-facto metrics)
+    # and the custom metrics (gleu, hit ... )
+    def eval_translate(self, data, beam_size=1, batch_size=16, bpe=True, bpe_token="@"):
+        
+        model = self.model
+        model.eval()
+        setIDs = self.setIDs
+        
+        count = 0
+
+        # one score for each language pair
+        bleu_scores = dict()
+        
+        # return a list of scores for each language
+        total_scores = dict()
+        total_sentences = dict()
+        total_hits = dict()
+        total_hit_sentences = dict()
+        
+        for sid in data: # sid = setid
+            
+            total_hits[sid] = 0
+            total_sentences[sid] = 0
+            total_scores[sid] = 0
+            total_hit_sentences[sid] = 0
+            
+            if self.adapt:
+                if sid != self.adapt_pair:
+                    continue
+            
+            dset = data[sid]
+            model.switchLangID(setIDs[sid][0], setIDs[sid][1])
+            model.switchPairID(sid)
+            
+            tgt_lang = self.dicts['tgtLangs'][setIDs[sid][1]]
+            src_lang = self.dicts['srcLangs'][setIDs[sid][0]]
+            tgt_dict = self.dicts['vocabs'][tgt_lang]
+            src_dict = self.dicts['vocabs'][src_lang]
+            
+            # we print translations into temp files
+            outF = tempfile.NamedTemporaryFile()
+            outRef = tempfile.NamedTemporaryFile()
                 
-                if bpe:
-                    line = line.replace('@@ ', '')
-                outRef.write(line + "\n")
-                outRef.flush()
-        
-        # compute bleu using external script
-        bleu = moses_multi_bleu(outF.name, outRef.name)
-        refFile.close()
-        inFile.close()
-        outF.close()
-        outRef.close()
-        # after decoding, switch model back to training mode
-        self.model.train()
-        self.model.decoder.attn.applyMask(None)
-        
-        return bleu
+            for i in range(len(dset)):
+                # exclude original indices
+                batch = dset[i][:-1]
+                
+                src = batch[0]
+                
+                # exclude <s> from targets
+                targets = batch[1][1:]
+                
+                transposed_targets = targets.data.transpose(0, 1) # bsize x nwords
+                
+                pred = self.translator.translate(src)
+                
+                bpe_string = bpe_token + bpe_token + " "
+                
+                for b in range(len(pred)):
+                    
+                    ref_tensor = transposed_targets[b].tolist()
+                    
+                    predWordList = tgt_dict.convertToLabels(pred[b], onmt.Constants.EOS)
+                    decodedSent = " ".join(predWordList)
+                    decodedSent = decodedSent.replace(bpe_string, '')
+                    
+                    refWordList = tgt_dict.convertToLabels(ref_tensor, onmt.Constants.EOS)
+                    refSent = " ".join(refWordList)
+                    
+                    refSent = refSent.split('. ; .')[0]
+                    
+                    refSent = refSent.replace(bpe_string, '')
+                    
+                    
+                    # Flush the pred and reference sentences to temp files 
+                    outF.write(decodedSent + "\n")
+                    outF.flush()
+                    outRef.write(refSent + "\n")
+                    outRef.flush()
+                    
+                    s = self.score(refWordList, predWordList)
+                    
+                    if len(s) > 2:
+                        gleu = s[1]
+                        hit = s[2]
+                        
+                        if hit >= 0:
+                            total_hit_sentences[sid] += 1
+                            total_hits[sid] += hit
+                            
+                    total_scores[sid] += s[0] * 100 
+                #~ 
+                #~ if len(s) > 2:
+                    #~ gleu = s[1]
+                    #~ hit = s[2]
+                    #~ 
+                    #~ if hit >= 0:
+                        #~ total_hit_sentences += 1
+                        #~ total_hit += hit
+                #~ 
+                #~ if verbose:
+                    #~ sampledSent = " ".join(tgtWords)
+                    #~ refSent = " ".join(refWords)
+                    #~ 
+                    #~ if s[0] > 0:
+                        #~ print "SAMPLE :", sampledSent
+                        #~ print "   REF :", refSent
+                        #~ print "Score =", s
+#~ 
+                #~ # bleu is scaled by 100, probably because improvement by .01 is hard ?
+                #~ total_score += s[0] * 100 
+            
+            total_sentences[sid] += batch_size
+                    
+            # compute bleu using external script
+            bleu = moses_multi_bleu(outF.name, outRef.name)
+            outF.close()
+            outRef.close()    
+            
+            bleu_scores[sid] = bleu
+            
+            #~ if total_hit_sentences > 0:
+            #~ average_hit = total_hit / total_hit_sentences
+            #~ print("Average HIT : %.2f" % (average_hit * 100))
+
+            #~ average_score = total_score / total_sentences
+
+            # after decoding, switch model back to training mode
+            self.model.train()
+            
+            return bleu_scores

@@ -4,7 +4,14 @@ import torch.nn as nn
 import torch
 from torch.autograd import Variable
 
+# Ensemble decoding
 
+
+def loadImageLibs():
+    "Conditional import of torch image libs."
+    global Image, transforms
+    from PIL import Image
+    from torchvision import transforms
 
 
 class Translator(object):
@@ -12,51 +19,90 @@ class Translator(object):
         self.opt = opt
         self.tt = torch.cuda if opt.cuda else torch
         self.beam_accum = None
-
-        checkpoint = torch.load(opt.model,
+        self._type = "text"
+        self.ensemble_op = opt.ensemble_op
+        
+        # opt.model should be a string of models, split by |
+        
+        models = opt.model.split("|")
+        print(models)
+        self.n_models = len(models)
+        
+        # only one src and target language
+        
+        self.models = list()
+        self.logSoftMax = torch.nn.LogSoftmax()
+        nSets = 0
+        
+        for i, model in enumerate(models):
+            if opt.verbose:
+                print('Loading model from %s' % opt.model)
+            checkpoint = torch.load(opt.model,
                                map_location=lambda storage, loc: storage)
+        
+            if opt.verbose:
+                print('Done')
 
-        model_opt = checkpoint['opt']
-        self.src_dict = checkpoint['dicts']['src']
-        self.tgt_dict = checkpoint['dicts']['tgt']
-        self._type = model_opt.encoder_type \
-            if "encoder_type" in model_opt else "text"
-        
-        embeddings = onmt.utils.createEmbeddings(model_opt, checkpoint['dicts'])
-
-        model = onmt.utils.createNMT(model_opt, checkpoint['dicts'], embeddings)
-        
-        #~ encoder = onmt.Models.Encoder(model_opt, self.src_dict)
-        
-
-        #~ decoder = onmt.Models.Decoder(model_opt, self.tgt_dict)
-        
-        #~ generator = onmt.Models.Generator(model_opt.rnn_size, self.tgt_dict)
-        #~ model = onmt.Models.NMTModel(encoder, decoder, generator)\
-        
-        #~ for k, v in checkpoint['model'].items():
-                    #~ print k
-        
-        model_state_dict = {k: v for k, v in checkpoint['model'].items()
-                                                            if 'criterion' not in k}
-
-        #~ generator = nn.Sequential(
-            #~ nn.Linear(model_opt.rnn_size, self.tgt_dict.size()),
-            #~ nn.LogSoftmax())
+            model_opt = checkpoint['opt']
             
-        
+            # delete optim information to save GPU memory
+            if 'optim' in checkpoint:
+                del checkpoint['optim']
+            
+            # assuming that all these models use the same dict
+            # the first checkpoint's dict will be loaded
+            if i == 0:
+                self.dicts = checkpoint['dicts']
+                self.src_dict = self.dicts['vocabs'][opt.src_lang]
+                self.tgt_dict = self.dicts['vocabs'][opt.tgt_lang]
+                nSets = self.dicts['nSets']
+            
+            
+            # Build the model
+            encoder = onmt.Models.Encoder(model_opt, self.dicts['src'])
+            decoder = onmt.Models.Decoder(model_opt, self.dicts['tgt'], nSets)
+            this_model = onmt.Models.NMTModel(encoder, decoder)
 
-        model.load_state_dict(model_state_dict)
-        #~ generator.load_state_dict(checkpoint['generator'])
+            generator = onmt.Models.Generator(model_opt, self.dicts['tgt'])
 
-        if opt.cuda:
-            model.cuda()
-        else:
-            model.cpu()
+            this_model.load_state_dict(checkpoint['model'])
+            generator.load_state_dict(checkpoint['generator'])
 
+            if opt.cuda:
+                this_model.cuda()
+                generator.cuda()
+            else:
+                this_model.cpu()
+                generator.cpu()
 
-        self.model = model
-        self.model.eval()
+            this_model.generator = generator
+
+            #~ self.model = model
+            #~ self.model.eval()
+            this_model.eval()
+            
+            # Need to find the src and tgt id
+            srcID = self.dicts['srcLangs'].index(opt.src_lang)
+            tgtID = self.dicts['tgtLangs'].index(opt.tgt_lang)
+            
+            # After that, look for the pairID
+            
+            setIDs = self.dicts['setIDs']
+            
+            pair = -1
+            for i, sid in enumerate(setIDs):
+                if sid[0] == srcID and sid[1] == tgtID:
+                    pair = i
+                    break
+                            
+            assert pair >= 0, "Cannot find any language pair with your provided src and tgt id"
+            print(" * Translating with pair %i " % pair)
+            #~ print(srcID, tgtID)
+            #~ print(self.model)
+            this_model.switchLangID(srcID, tgtID)
+            this_model.switchPairID(pair) 
+            
+            self.models.append(this_model)
 
     def initBeamAccum(self):
         self.beam_accum = {
@@ -70,6 +116,52 @@ class Translator(object):
             return batch.size(1)
         else:
             return batch.size(0)
+    
+    # Combine distributions from different models
+    def _combineOutputs(self, outputs):
+        
+        if len(outputs) == 1:
+            return outputs[0]
+        
+        if self.ensemble_op == "logSum":
+            output = (outputs[0])
+            
+            # sum the log prob
+            for i in range(1, len(outputs)):
+                output += (outputs[i])
+                
+            output.div(len(outputs))
+            
+            #~ output = torch.log(output)
+            output = self.logSoftMax(output)
+        elif self.ensemble_op == "sum":
+            output = torch.exp(outputs[0])
+            
+            # sum the log prob
+            for i in range(1, len(outputs)):
+                output += torch.exp(outputs[i])
+                
+            output.div(len(outputs))
+            
+            #~ output = torch.log(output)
+            output = torch.log(output)
+        else:
+            raise ValueError('Emsemble operator needs to be "sum" or "logSum", the current value is %s' % self.ensemble_op)
+
+        
+        return output
+    
+    # Take the average of attention scores
+    def _combineAttention(self, attns):
+        
+        attn = attns[0]
+        
+        for i in range(1, len(attns)):
+            attn += attns[i]
+        
+        attn.div(len(attns))
+        
+        return attn
 
     def buildData(self, srcBatch, goldBatch):
         # This needs to be the same as preprocess.py.
@@ -95,7 +187,9 @@ class Translator(object):
 
     def buildTargetTokens(self, pred, src, attn):
         tokens = self.tgt_dict.convertToLabels(pred, onmt.Constants.EOS)
-        tokens = tokens[:-1]  # EOS
+        #~ tokens = tokens[:-1]  # EOS
+        if tokens[-1] == onmt.Constants.EOS_WORD:
+            tokens = tokens[:-1]  # EOS
         if self.opt.replace_unk:
             for i in range(len(tokens)):
                 if tokens[i] == onmt.Constants.UNK_WORD:
@@ -105,22 +199,30 @@ class Translator(object):
 
     def translateBatch(self, srcBatch, tgtBatch):
         # Batch size is in different location depending on data.
+        
+        contexts = dict()
+        encStates = dict()
 
         beamSize = self.opt.beam_size
 
-        #  (1) run the encoder on the src
-        encStates, context = self.model.encoder(srcBatch)
+        #  (1) run the encoders on the src
+        for i in xrange(self.n_models):
+            states, contexts[i] = self.models[i].encoder(srcBatch)
+            
+            # reshape the states
+            encStates[i] = (self.models[i]._fix_enc_hidden(states[0]),
+                     self.models[i]._fix_enc_hidden(states[1]))
 
         # Drop the lengths needed for encoder.
         srcBatch = srcBatch[0]
         batchSize = self._getBatchSize(srcBatch)
 
-        rnnSize = context.size(2)
-        encStates = (self.model._fix_enc_hidden(encStates[0]),
-                     self.model._fix_enc_hidden(encStates[1]))
-
-        decoder = self.model.decoder
-        attentionLayer = decoder.attn
+        rnnSizes = dict()
+        for i in xrange(self.n_models):
+            rnnSizes[i] = contexts[i].size(2)
+        
+        #~ decoder = self.model.decoder
+        #~ attentionLayer = decoder.attn.current()
         useMasking = ( self._type == "text" and batchSize > 1 )
 
         #  This mask is applied to the attention model inside the decoder
@@ -131,20 +233,27 @@ class Translator(object):
 
         def mask(padMask):
             if useMasking:
-                attentionLayer.applyMask(padMask)
+                for i in xrange(self.n_models):
+                    self.models[i].decoder.attn.current().applyMask(padMask)
+                #~ attentionLayer.applyMask(padMask)
 
         #  (2) if a target is specified, compute the 'goldScore'
         #  (i.e. log likelihood) of the target under the model
-        goldScores = context.data.new(batchSize).zero_()
-        if tgtBatch is not None:
-            decStates = encStates
-            decOut = self.model.make_init_decoder_output(context)
+        goldScores = contexts[0].data.new(batchSize).zero_()
+        
+        # currently gold scoring is only supported when using single model decoding
+        if tgtBatch is not None and self.n_models == 1:
+            decStates = encStates[0]
+            this_model = self.models[0]
+            context = contexts[0]
+
+            decOut = this_model.make_init_decoder_output(context)
             mask(padMask)
-            initOutput = self.model.make_init_decoder_output(context)
-            decOut, decStates, attn = self.model.decoder(
+            initOutput = this_model.make_init_decoder_output(context)
+            decOut, decStates, attn = this_model.decoder(
                 tgtBatch[:-1], decStates, context, initOutput)
             for dec_t, tgt_t in zip(decOut, tgtBatch[1:].data):
-                gen_t = self.model.generator.forward(dec_t)
+                gen_t = this_model.generator.forward(dec_t)
                 tgt_t = tgt_t.unsqueeze(1)
                 scores = gen_t.data.gather(1, tgt_t)
                 scores.masked_fill_(tgt_t.eq(onmt.Constants.PAD), 0)
@@ -153,14 +262,26 @@ class Translator(object):
         #  (3) run the decoder to generate sentences, using beam search
 
         # Expand tensors for each beam.
-        context = Variable(context.data.repeat(1, beamSize, 1))
-
-        decStates = (Variable(encStates[0].data.repeat(1, beamSize, 1)),
-                     Variable(encStates[1].data.repeat(1, beamSize, 1)))
-
+        
+        decStates = dict()
+        
+        for i in xrange(self.n_models):
+            contexts[i] = Variable(contexts[i].data.repeat(1, beamSize, 1))
+        
+            decStates[i] = (Variable(encStates[i][0].data.repeat(1, beamSize, 1)),
+                         Variable(encStates[i][1].data.repeat(1, beamSize, 1)))
+        
+        # Initialize the beams
+        # Each beam is an object containing the translation status for each sentence in the batch
         beam = [onmt.Beam(beamSize, self.opt.cuda) for k in range(batchSize)]
-
-        decOut = self.model.make_init_decoder_output(context)
+        
+        # Here we prepare the decoder output (zeroes)
+        # For input feeding
+        decOuts = dict()
+        attns = dict()
+        outs = dict()
+        for i in xrange(self.n_models):
+            decOuts[i] = self.models[i].make_init_decoder_output(contexts[i])
 
         if useMasking:
             padMask = srcBatch.data.eq(
@@ -175,11 +296,21 @@ class Translator(object):
             # Prepare decoder input.
             input = torch.stack([b.getCurrentState() for b in beam
                                  if not b.done]).t().contiguous().view(1, -1)
-            decOut, decStates, attn = self.model.decoder(
-                Variable(input, volatile=True), decStates, context, decOut)
-            # decOut: 1 x (beam*batch) x numWords
-            decOut = decOut.squeeze(0)
-            out = self.model.generator.forward(decOut)
+                                 
+            # compute new decoder output (distribution)
+            for i in xrange(self.n_models):
+                decOuts[i], decStates[i], attns[i] = self.models[i].decoder(
+                    Variable(input, volatile=True), decStates[i], contexts[i], decOuts[i])
+                # decOut: 1 x (beam*batch) x numWords
+                decOuts[i] = decOuts[i].squeeze(0)
+                outs[i] = self.models[i].generator.forward(decOuts[i])
+            
+            # combine outputs and attention
+            
+            out = self._combineOutputs(outs)
+            
+            attn = self._combineAttention(attns)
+            
 
             # batch x beam x numWords
             wordLk = out.view(beamSize, remainingSents, -1) \
@@ -195,15 +326,16 @@ class Translator(object):
                 idx = batchIdx[b]
                 if not beam[b].advance(wordLk.data[idx], attn.data[idx]):
                     active += [b]
-
-                for decState in decStates:  # iterate over h, c
-                    # layers x beam*sent x dim
-                    sentStates = decState.view(-1, beamSize,
-                                               remainingSents,
-                                               decState.size(2))[:, :, idx]
-                    sentStates.data.copy_(
-                        sentStates.data.index_select(
-                            1, beam[b].getCurrentOrigin()))
+                
+                for i in xrange(self.n_models):
+                    for decState in decStates[i]:  # iterate over h, c
+                        # layers x beam*sent x dim
+                        sentStates = decState.view(-1, beamSize,
+                                                   remainingSents,
+                                                   decState.size(2))[:, :, idx]
+                        sentStates.data.copy_(
+                            sentStates.data.index_select(
+                                1, beam[b].getCurrentOrigin()))
 
             if not active:
                 break
@@ -213,18 +345,19 @@ class Translator(object):
             activeIdx = self.tt.LongTensor([batchIdx[k] for k in active])
             batchIdx = {beam: idx for idx, beam in enumerate(active)}
 
-            def updateActive(t):
+            def updateActive(t, size):
                 # select only the remaining active sentences
-                view = t.data.view(-1, remainingSents, rnnSize)
+                view = t.data.view(-1, remainingSents, size)
                 newSize = list(t.size())
                 newSize[-2] = newSize[-2] * len(activeIdx) // remainingSents
                 return Variable(view.index_select(1, activeIdx)
                                 .view(*newSize), volatile=True)
-
-            decStates = (updateActive(decStates[0]),
-                         updateActive(decStates[1]))
-            decOut = updateActive(decOut)
-            context = updateActive(context)
+            
+            for i in xrange(self.n_models):
+                decStates[i] = (updateActive(decStates[i][0], rnnSizes[i]),
+                             updateActive(decStates[i][1], rnnSizes[i]))
+                decOuts[i] = updateActive(decOuts[i], rnnSizes[i])
+                contexts[i] = updateActive(contexts[i], rnnSizes[i])
             if useMasking:
                 padMask = padMask.index_select(1, activeIdx)
 
@@ -257,6 +390,8 @@ class Translator(object):
                     [[self.tgt_dict.getLabel(id)
                       for id in t.tolist()]
                      for t in beam[b].nextYs][1:])
+        
+        mask(None)
 
         return allHyp, allScores, allAttn, goldScores
 
