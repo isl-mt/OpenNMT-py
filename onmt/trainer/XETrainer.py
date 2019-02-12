@@ -47,6 +47,7 @@ class XETrainer(object):
         self.optim = optim 
         self.evaluator = evaluator
         self.opt = opt
+        self.accumCount = opt.accum_count
         
         if opt.copy_pointer:
             self.criterions = MemoryOptimizedCopyLoss(self.dicts['tgt'], label_smoothing=self.opt.label_smoothing, 
@@ -104,8 +105,9 @@ class XETrainer(object):
         start_time = time.time()
         
         def trainEpoch(epoch, batchOrder=None):
-
             
+            numberGradientsNotAccumulated = 0
+
             self.trainLoader.reset_iterators()
             batchOrder = self.trainLoader.batchOrder
 
@@ -157,8 +159,12 @@ class XETrainer(object):
                 
                              
                 # Update the parameters.
-                optim.step()
-                self.num_updates += 1
+                if numberGradientsNotAccumulated == self.accumCount:
+                    optim.step()
+                    self.num_updates += self.accumCount
+                    numberGradientsNotAccumulated = 0
+                else:
+                    numberGradientsNotAccumulated += 1
 
                 # Statistics for the current set
                 num_words = targets.data.ne(onmt.Constants.PAD).sum()
@@ -234,6 +240,10 @@ class XETrainer(object):
                     torch.save(checkpoint,
                          file_name
                          % (opt.save_model, avgDevPpl, self.num_updates ))
+
+            if numberGradientsNotAccumulated > 0:
+                optim.step()
+
             return [total_loss[j] / (total_words[j]+1e-6) for j in xrange(len(setIDs))]
             
         

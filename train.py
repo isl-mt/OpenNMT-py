@@ -80,6 +80,8 @@ parser.add_argument('-encoder_type', default='text',
                     help="Type of encoder to use. Options are [text|img].")
 parser.add_argument('-batch_size', type=int, default=64,
                     help='Maximum batch size')
+parser.add_argument('-accum_count', metavar='NUMBER', type=int, default=1,
+                    help='Accumulate NUMBER gradients of mini-batches before updating the weights.')
 parser.add_argument('-update_every', type=int, default=1,
                     help='Maximum batch size')
 parser.add_argument('-max_generator_batches', type=int, default=2048,
