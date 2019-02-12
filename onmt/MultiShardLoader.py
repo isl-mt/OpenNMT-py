@@ -13,6 +13,8 @@ class MultiShardLoader(object):
         
         self.data_path = opt.data
         
+        self.smallest_dataset_multiplicator = opt.smallest_dataset_multiplicator
+        
         self.dicts = dicts
         
         nSets = dicts['nSets']
@@ -73,6 +75,19 @@ class MultiShardLoader(object):
     
     def load_shard(self, shard_file):
         pass
+
+
+    def set_dataset_sizes(self):
+        self.sizes = dict()
+        
+        for i in self.datasets:
+            self.sizes[i] = len(self.datasets[i])
+            if self.adapt and i not in self.adapt_pairs:
+                self.sizes[i] = 0                  
+            
+        self.smallest_dataset = sorted(((k, v) for k, v in self.sizes.items()), key=lambda x: x[1])[0][0]
+        self.sizes[self.smallest_dataset] *= self.smallest_dataset_multiplicator
+
         
     def reset_iterators(self, batchOrder=None):
         
@@ -99,24 +114,22 @@ class MultiShardLoader(object):
         
         #~ print(self.sampleDist)
         
-        self.sizes = dict()
-        
-        for i in self.datasets:
-            
-            self.sizes[i] = len(self.datasets[i])
-            
-            if self.adapt:
-                if i not in self.adapt_pairs:
-                    self.sizes[i] = 0
+        self.set_dataset_sizes()
+
         self.nSamples = self.dataSizes()
         
         if batchOrder is None:
             batchOrder = dict()
             for i in self.datasets:
-                batchOrder[i] = torch.randperm(len(self.datasets[i]))
+                batchOrder[i] = torch.randperm(self.sizes[i]) if self.sizes[i] > 0 else torch.Tensor()
             self.batchOrder = batchOrder
         else:
             self.batchOrder = batchOrder
+            if self.smallest_dataset_multiplicator > 1:
+                self.batchOrder[self.smallest_dataset] = torch.cat(
+                    [self.batchOrder[self.smallest_dataset]] * self.smallest_dataset_multiplicator, 0)
+            elif self.smallest_dataset_multiplicator == 0:
+                self.batchOrder[self.smallest_dataset] = torch.Tensor()
         
         #~ self.sizes = [len(self.datasets[i]) for i in self.datasets]
         
@@ -144,16 +157,7 @@ class MultiShardLoader(object):
         #~ else:
             #~ nSamples = sum(sizes)
         if not hasattr(self, 'sizes'):
-            self.sizes = dict()
-        
-            for i in self.datasets:
-                
-                self.sizes[i] = len(self.datasets[i])
-                
-                if self.adapt:
-                    if i not in self.adapt_pairs:
-                        self.sizes[i] = 0
-            
+            self.set_dataset_sizes()            
         
         nSamples = sum(self.sizes.values())
         
@@ -191,7 +195,10 @@ class MultiShardLoader(object):
             self.set_iterators[sampledSet] += 1 
             self.sample_iterator += 1
             
-            batch = self.datasets[sampledSet][batchIdx]
+            if self.smallest_dataset == sampledSet:
+                batch = self.datasets[sampledSet][batchIdx // self.smallest_dataset_multiplicator]
+            else:
+                batch = self.datasets[sampledSet][batchIdx]
             
             return batch, sampledSet
         else:

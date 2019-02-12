@@ -51,6 +51,8 @@ parser.add_argument('-override', action='store_true',
                     help="""Overwrite the save file to reduce space consumption""")
 parser.add_argument('-loading_strategy', default='all',
                     help="How to load the data. Default strategy = all. Choices=all|piece")
+parser.add_argument('-smallest_dataset_multiplicator', metavar='NUMBER', type=int, default=1,
+                    help='Use NUMBER times one instance of the smallest dataset in the training of one epoch')
 # Model options
 
 parser.add_argument('-layers', type=int, default=2,
